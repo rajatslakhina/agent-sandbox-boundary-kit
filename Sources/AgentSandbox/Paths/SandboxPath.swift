@@ -1,7 +1,7 @@
 import Foundation
 
 /// Why a raw string could not become a `SandboxPath`.
-public enum PathError: Error, Equatable, Sendable {
+public enum PathError: Error, Equatable, Sendable, CustomStringConvertible {
     case notAbsolute(String)
     case containsNUL
     /// The path contains a `..` component. See `SandboxPath` for why these are
@@ -9,6 +9,16 @@ public enum PathError: Error, Equatable, Sendable {
     case parentReference(String)
     case tooLong
     case tooManyComponents
+
+    public var description: String {
+        switch self {
+        case let .notAbsolute(path): return "not an absolute path: \(path)"
+        case .containsNUL: return "contains a NUL byte"
+        case let .parentReference(path): return "contains a '..' component: \(path)"
+        case .tooLong: return "longer than \(SandboxPath.maxLength) bytes"
+        case .tooManyComponents: return "more than \(SandboxPath.maxComponents) components"
+        }
+    }
 }
 
 /// An absolute path with no `.`, no `..` and no empty components.

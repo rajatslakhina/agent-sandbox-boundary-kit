@@ -39,10 +39,19 @@ public struct PolicyGate: AccessEvaluating {
         case let .network(url):
             return evaluateNetwork(url, manifest)
         case let .keychain(service):
-            return manifest.keychainServices.contains(service) ? .allow : .deny(.keychainForbidden(service.clamped(to: 120)))
+            // Byte comparison: Keychain matches service names by bytes, while Swift String
+            // equality treats canonically equivalent spellings (NFC/NFD) as equal.
+            return Self.containsBytewise(manifest.keychainServices, service)
+                ? .allow : .deny(.keychainForbidden(service.clamped(to: 120)))
         case let .appGroup(identifier):
-            return manifest.appGroups.contains(identifier) ? .allow : .deny(.appGroupForbidden(identifier.clamped(to: 120)))
+            return Self.containsBytewise(manifest.appGroups, identifier)
+                ? .allow : .deny(.appGroupForbidden(identifier.clamped(to: 120)))
         }
+    }
+
+    static func containsBytewise(_ set: Set<String>, _ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        return set.contains { Array($0.utf8) == bytes }
     }
 
     private func evaluateFile(

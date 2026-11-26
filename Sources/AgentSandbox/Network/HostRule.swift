@@ -111,12 +111,17 @@ enum HostClassifier {
         if host == "localhost" || host.hasSuffix(".localhost") { return .loopback }
         if host.hasSuffix(".local") { return .multicastDNS }
         if host.contains(":") {
-            if host == "::1" { return .loopback }
-            if host == "::" { return .unspecified }
-            if host.hasPrefix("fe8") || host.hasPrefix("fe9") || host.hasPrefix("fea") || host.hasPrefix("feb") {
-                return .linkLocal
+            // Classify by address bytes, not by spelling ("fe8::1" is 0fe8::1, not link-local).
+            var address = in6_addr()
+            guard inet_pton(AF_INET6, host, &address) == 1 else { return nil }
+            let bytes = withUnsafeBytes(of: &address) { Array($0) }
+            guard bytes.count == 16 else { return nil }
+            if bytes[0..<15].allSatisfy({ $0 == 0 }) {
+                if bytes[15] == 1 { return .loopback }
+                if bytes[15] == 0 { return .unspecified }
             }
-            if host.hasPrefix("fc") || host.hasPrefix("fd") { return .privateNetwork }
+            if bytes[0] == 0xFE, bytes[1] & 0xC0 == 0x80 { return .linkLocal }      // fe80::/10
+            if bytes[0] & 0xFE == 0xFC { return .privateNetwork }                  // fc00::/7 (ULA)
             return nil
         }
         let octets = host.split(separator: ".").map { UInt8($0) }

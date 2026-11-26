@@ -302,6 +302,18 @@ final class ToolRuntimeTests: XCTestCase {
         guard case .denied(.symlinkEscape) = outcome else { return XCTFail("the default resolver must follow links; got \(outcome)") }
     }
 
+    func testCredentialsInAURLNeverReachTheAuditTrail() async throws {
+        let fetch = DeclarativeTool(name: "http_get", summary: "",
+                                    resources: { [.network(url: try DeclarativeTool.require("url", in: $0))] },
+                                    body: { _, _ in "" })
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [fetch])
+        _ = await runtime.execute(ToolCall(id: "c", tool: "http_get", arguments: ["url": "https://alice:hunter2@api.example.com/v1"]))
+        let audit = await runtime.snapshot().audit
+        XCTAssertEqual(audit.count, 1)
+        XCTAssertFalse(audit.contains { $0.detail.contains("hunter2") || $0.detail.contains("alice") })
+        XCTAssertTrue(audit.first?.detail.contains("api.example.com") ?? false)
+    }
+
     func testAuditedDenialReasonsAreClamped() async throws {
         let runtime = try ToolRuntime(manifest: try manifest(), tools: [readTool(RunCounter())], lockout: .disabled)
         let longPath = "/" + Array(repeating: "segment", count: 200).joined(separator: "/")
@@ -325,11 +337,13 @@ final class ToolRuntimeTests: XCTestCase {
 
     func testFlaggedCallWithoutClassifierFailsClosed() async throws {
         let counter = RunCounter()
-        let runtime = try ToolRuntime(manifest: try manifest(), tools: [readTool(counter)])
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [readTool(counter)], lockout: LockoutPolicy(maxDenials: 1))
         let outcome = await runtime.execute(read("/W/session.token"))
         guard case .denied(.reviewUnavailable) = outcome else { return XCTFail("got \(outcome)") }
         let runs = await counter.runs
         XCTAssertEqual(runs, 0)
+        let locked = await runtime.isLocked
+        XCTAssertTrue(locked, "asking for a flagged file with no reviewer configured counts")
     }
 
     func testClassifierAllowDenyAndThrow() async throws {
@@ -340,9 +354,11 @@ final class ToolRuntimeTests: XCTestCase {
         XCTAssertEqual(allowed, .executed(output: "read /W/session.token"))
 
         let distrusting = try ToolRuntime(manifest: try manifest(), tools: [readTool(counter)],
-                                          classifier: ToolTrustClassifier(trustedTools: []))
+                                          classifier: ToolTrustClassifier(trustedTools: []), lockout: LockoutPolicy(maxDenials: 1))
         let denied = await distrusting.execute(read("/W/session.token"))
         guard case .denied(.classifierDenied) = denied else { return XCTFail("got \(denied)") }
+        let lockedByDenial = await distrusting.isLocked
+        XCTAssertTrue(lockedByDenial, "a classifier denial counts")
 
         let throwing = try ToolRuntime(manifest: try manifest(), tools: [readTool(counter)],
                                        classifier: ThrowingClassifier(), lockout: LockoutPolicy(maxDenials: 1))

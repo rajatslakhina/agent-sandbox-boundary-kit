@@ -49,10 +49,16 @@ final class NetworkRuleTests: XCTestCase {
         XCTAssertEqual(try verdict("https://printer.local/x"), .deny(.localNetwork(host: "printer.local", kind: "multicastDNS")))
         XCTAssertEqual(try verdict("https://169.254.1.1/x"), .deny(.localNetwork(host: "169.254.1.1", kind: "linkLocal")))
         XCTAssertEqual(try verdict("https://[::1]/x"), .deny(.localNetwork(host: "::1", kind: "loopback")))
+        XCTAssertEqual(try verdict("https://[fe80::1]/x"), .deny(.localNetwork(host: "fe80::1", kind: "linkLocal")))
+        XCTAssertEqual(try verdict("https://[fd12::1]/x"), .deny(.localNetwork(host: "fd12::1", kind: "privateNetwork")))
+        // Classified by bytes, not spelling: fe8::1 is 0fe8::1 and fc::1 is 00fc::1, neither local.
+        XCTAssertEqual(try verdict("https://[fe8::1]/x"), .deny(.ipLiteralNotAllowed("fe8::1")))
+        XCTAssertEqual(try verdict("https://[fc::1]/x"), .deny(.ipLiteralNotAllowed("fc::1")))
         XCTAssertEqual(try verdict("https://2130706433/x"), .deny(.ipLiteralNotAllowed("2130706433")))
         XCTAssertEqual(try verdict("https://8.8.8.8/x"), .deny(.ipLiteralNotAllowed("8.8.8.8")))
         // Other spellings of local addresses are not classed, but are still denied as IP literals.
-        for url in ["https://[::ffff:127.0.0.1]/x", "https://[::ffff:c0a8:114]/x", "https://[0:0:0:0:0:0:0:1]/x", "https://0x7f.1/x"] {
+        XCTAssertEqual(try verdict("https://[0:0:0:0:0:0:0:1]/x"), .deny(.localNetwork(host: "0:0:0:0:0:0:0:1", kind: "loopback")))
+        for url in ["https://[::ffff:127.0.0.1]/x", "https://[::ffff:c0a8:114]/x", "https://0x7f.1/x"] {
             guard case .deny(.ipLiteralNotAllowed) = try verdict(url) else { return XCTFail("\(url) must be denied as an IP literal") }
         }
         // An exact rule can still name a private address deliberately.
@@ -113,7 +119,7 @@ final class FileRuleTests: XCTestCase {
 
     func testParentReferencesAreDeniedOutright() throws {
         let outcome = gate.evaluate(.file(path: "/App/Docs/../Secrets/key", access: .read), under: try manifest(), resolver: LexicalResolver())
-        XCTAssertEqual(outcome, .deny(.invalidPath(String(describing: PathError.parentReference("/App/Docs/../Secrets/key")))))
+        XCTAssertEqual(outcome, .deny(.invalidPath("contains a '..' component: /App/Docs/../Secrets/key")))
         // The bypass this closes: `link/..` would collapse to a path inside the grant
         // as text, while the kernel walks `..` from wherever the link points.
         let resolver = SymlinkTableResolver(links: [try SandboxPath("/App/Docs/link"): try SandboxPath("/App/Secrets/inner")])
@@ -207,6 +213,17 @@ final class FileRuleTests: XCTestCase {
         XCTAssertEqual(gate.evaluate(.keychain(service: "com.example.auth"), under: m, resolver: LexicalResolver()), .deny(.keychainForbidden("com.example.auth")))
         XCTAssertEqual(gate.evaluate(.appGroup(identifier: "group.com.example.allowed"), under: m, resolver: LexicalResolver()), .allow)
         XCTAssertEqual(gate.evaluate(.appGroup(identifier: "group.other"), under: m, resolver: LexicalResolver()), .deny(.appGroupForbidden("group.other")))
+    }
+
+    func testKeychainAndAppGroupNamesCompareByBytesNotCanonicalEquivalence() {
+        let nfc = "caf\u{E9}"          // é as one scalar
+        let nfd = "cafe\u{301}"        // e + combining acute
+        XCTAssertEqual(nfc, nfd, "Swift String equality says these are equal")
+        let m = CapabilityManifest(keychainServices: [nfc], appGroups: ["group." + nfc])
+        XCTAssertEqual(gate.evaluate(.keychain(service: nfc), under: m, resolver: LexicalResolver()), .allow)
+        XCTAssertEqual(gate.evaluate(.keychain(service: nfd), under: m, resolver: LexicalResolver()), .deny(.keychainForbidden(nfd)))
+        XCTAssertEqual(gate.evaluate(.appGroup(identifier: "group." + nfd), under: m, resolver: LexicalResolver()),
+                       .deny(.appGroupForbidden("group." + nfd)))
     }
 
     func testEmptyManifestDeniesEverything() {

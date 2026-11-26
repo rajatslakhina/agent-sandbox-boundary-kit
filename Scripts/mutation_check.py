@@ -211,6 +211,41 @@ MUTANTS = [
         "self.maxHops = max(1, maxHops)",
         "ResolverTests/testHopLimitCannotBeConfiguredAway",
     ),
+    (
+        'unreviewable flagged access not counted',
+        SRC / "Policy/Resource.swift",
+        'case .classifierUnavailable, .manifestChanged, .verdictChangedDuringReview, .callNotActive, .sessionLocked:',
+        'case .reviewUnavailable, .classifierUnavailable, .manifestChanged, .verdictChangedDuringReview, .callNotActive, .sessionLocked:',
+        'ToolRuntimeTests/testFlaggedCallWithoutClassifierFailsClosed',
+    ),
+    (
+        'classifier denial not counted',
+        SRC / "Policy/Resource.swift",
+        'case .classifierUnavailable, .manifestChanged, .verdictChangedDuringReview, .callNotActive, .sessionLocked:',
+        'case .classifierDenied, .classifierUnavailable, .manifestChanged, .verdictChangedDuringReview, .callNotActive, .sessionLocked:',
+        'ToolRuntimeTests/testClassifierAllowDenyAndThrow',
+    ),
+    (
+        'IPv6 link-local classified by spelling',
+        SRC / "Network/HostRule.swift",
+        'if bytes[0] == 0xFE, bytes[1] & 0xC0 == 0x80 { return .linkLocal }',
+        'if host.hasPrefix("fe8") { return .linkLocal }',
+        'NetworkRuleTests/testClassifiesLocalAddressesAndIPLiterals',
+    ),
+    (
+        'Keychain names compared by canonical equivalence',
+        SRC / "Policy/PolicyGate.swift",
+        'return set.contains { Array($0.utf8) == bytes }',
+        'return set.contains(value)',
+        'FileRuleTests/testKeychainAndAppGroupNamesCompareByBytesNotCanonicalEquivalence',
+    ),
+    (
+        'URL credentials written to the audit trail',
+        SRC / "Policy/Resource.swift",
+        'case let .network(url): return "fetch \\(Self.redactingUserInfo(url))"',
+        'case let .network(url): return "fetch \\(url)"',
+        'ToolRuntimeTests/testCredentialsInAURLNeverReachTheAuditTrail',
+    ),
 ]
 
 

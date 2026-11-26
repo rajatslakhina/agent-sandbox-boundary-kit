@@ -1,3 +1,5 @@
+import Foundation
+
 /// What a tool call wants to touch. Every tool declares these before it runs, and
 /// may ask for more at run time through `ToolContext.authorize(_:)`.
 public enum Resource: Hashable, Sendable, CustomStringConvertible {
@@ -9,10 +11,21 @@ public enum Resource: Hashable, Sendable, CustomStringConvertible {
     public var description: String {
         switch self {
         case let .file(path, access): return "\(access.rawValue) \(path)"
-        case let .network(url): return "fetch \(url)"
+        case let .network(url): return "fetch \(Self.redactingUserInfo(url))"
         case let .keychain(service): return "keychain \(service)"
         case let .appGroup(identifier): return "app group \(identifier)"
         }
+    }
+}
+
+extension Resource {
+    /// The URL with any user name and password removed, so credentials typed into
+    /// a URL never reach the audit trail or a screen.
+    static func redactingUserInfo(_ url: String) -> String {
+        guard var parts = URLComponents(string: url), parts.user != nil || parts.password != nil else { return url }
+        parts.user = nil
+        parts.password = nil
+        return (parts.string ?? "(unparseable URL)") + " [user info removed]"
     }
 }
 
