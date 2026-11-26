@@ -80,12 +80,14 @@ public struct SandboxDenial: Error, Equatable, Sendable {
 public struct ToolContext: Sendable {
     public let callID: String
     public let toolName: String
+    let runToken: UInt64
     let runtime: ToolRuntime
 
     /// Judged by the deterministic rules against the manifest as it is NOW (not as
     /// it was when the call started), and counted toward lockout if denied.
     /// Review-flagged accesses are denied here: review is offered only up front.
+    /// Calling this after the tool's call has returned is refused (`.callNotActive`).
     public func authorize(_ resource: Resource) async throws {
-        try await runtime.authorizeDuringRun(resource, callID: callID, toolName: toolName)
+        try await runtime.authorizeDuringRun(resource, callID: callID, toolName: toolName, runToken: runToken)
     }
 }

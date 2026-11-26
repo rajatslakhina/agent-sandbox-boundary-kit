@@ -21,7 +21,10 @@ extension AccessEvaluating {
             case let .needsReview(why): reviews.append(why)
             }
         }
-        return reviews.isEmpty ? .allow : .needsReview(reviews.joined(separator: "; "))
+        guard !reviews.isEmpty else { return .allow }
+        // Bounded however many resources a call declares.
+        let shown = reviews.prefix(3).joined(separator: "; ")
+        return .needsReview(reviews.count > 3 ? "\(shown); and \(reviews.count - 3) more" : shown)
     }
 }
 
@@ -52,23 +55,29 @@ public struct PolicyGate: AccessEvaluating {
         do { lexical = try SandboxPath(raw) } catch {
             return .deny(.invalidPath(String(describing: error)))
         }
-        let containing = manifest.fileGrants.filter { lexical.isWithin($0.root) }
-        guard !containing.isEmpty else { return .deny(.outsideFileGrants(lexical.string)) }
-        let permitting = access == .write ? containing.filter { $0.mode == .readWrite } : containing
-        guard !permitting.isEmpty else { return .deny(.writeNotGranted(lexical.string)) }
+        // The deepest grant that contains a path decides its mode, so a read-only
+        // folder nested inside a read-write one stays read-only.
+        guard let lexicalGrant = Self.decidingGrant(for: lexical, among: manifest.fileGrants.map { ($0, $0.root) }) else {
+            return .deny(.outsideFileGrants(lexical.string))
+        }
+        if access == .write, lexicalGrant.mode != .readWrite {
+            return .deny(.writeNotGranted(lexical.string))
+        }
 
         let physical: SandboxPath
         do { physical = try resolver.resolve(lexical) } catch {
             return .deny(.resolutionFailed(lexical.string))
         }
-        // The physical path must sit inside the physical root of a grant that also
-        // contains the lexical path and permits this access. A root that cannot be
-        // resolved grants nothing (fail closed).
-        let stillInside = permitting.contains { grant in
-            guard let physicalRoot = try? resolver.resolve(grant.root) else { return false }
-            return physical.isWithin(physicalRoot)
+        // The physical path is judged the same way against the physical roots. A
+        // root that cannot be resolved grants nothing (fail closed).
+        let physicalRoots = manifest.fileGrants.compactMap { grant in
+            (try? resolver.resolve(grant.root)).map { (grant, $0) }
         }
-        guard stillInside else { return .deny(.symlinkEscape(lexical: lexical.string, resolved: physical.string)) }
+        guard let physicalGrant = Self.decidingGrant(for: physical, among: physicalRoots),
+              access == .read || physicalGrant.mode == .readWrite
+        else {
+            return .deny(.symlinkEscape(lexical: lexical.string, resolved: physical.string))
+        }
 
         let flagged = manifest.reviewSuffixes.map { $0.lowercased() }.filter { suffix in
             [lexical.lastComponent, physical.lastComponent].contains { name in
@@ -76,9 +85,26 @@ public struct PolicyGate: AccessEvaluating {
             }
         }
         guard flagged.isEmpty else {
-            return .needsReview("\(access.rawValue) of \(lexical.string) matches review suffix \(flagged.sorted().joined(separator: ", "))")
+            return .needsReview("\(access.rawValue) of \(lexical.string.clamped(to: 200)) matches review suffix \(flagged.sorted().joined(separator: ", "))")
         }
         return .allow
+    }
+
+    /// The grant whose root is the longest prefix of `path`. On a tie (the same root
+    /// listed twice with different modes) the more restrictive mode wins.
+    static func decidingGrant(for path: SandboxPath, among grants: [(FileGrant, SandboxPath)]) -> FileGrant? {
+        var best: (grant: FileGrant, depth: Int)?
+        for (grant, root) in grants where path.isWithin(root) {
+            let depth = root.components.count
+            if let current = best {
+                if depth > current.depth || (depth == current.depth && grant.mode == .readOnly) {
+                    best = (grant, depth)
+                }
+            } else {
+                best = (grant, depth)
+            }
+        }
+        return best?.grant
     }
 
     private func evaluateNetwork(_ raw: String, _ manifest: CapabilityManifest) -> RuleOutcome {
@@ -87,7 +113,8 @@ public struct PolicyGate: AccessEvaluating {
         let scheme = parts.scheme?.lowercased() ?? ""
         guard scheme == "https" else { return .deny(.schemeNotAllowed(scheme.clamped(to: 20))) }
         guard parts.user == nil, parts.password == nil else { return .deny(.credentialsInURL) }
-        guard let rawHost = parts.percentEncodedHost, !rawHost.contains("%"),
+        // `normalise` admits only [a-z0-9.-:], so a percent-encoded host is rejected there.
+        guard let rawHost = parts.percentEncodedHost,
               let host = HostClassifier.normalise(rawHost)
         else { return .deny(.malformedURL(shown)) }
         let port = parts.port ?? 443

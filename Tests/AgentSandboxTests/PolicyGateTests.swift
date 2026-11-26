@@ -51,6 +51,10 @@ final class NetworkRuleTests: XCTestCase {
         XCTAssertEqual(try verdict("https://[::1]/x"), .deny(.localNetwork(host: "::1", kind: "loopback")))
         XCTAssertEqual(try verdict("https://2130706433/x"), .deny(.ipLiteralNotAllowed("2130706433")))
         XCTAssertEqual(try verdict("https://8.8.8.8/x"), .deny(.ipLiteralNotAllowed("8.8.8.8")))
+        // Other spellings of local addresses are not classed, but are still denied as IP literals.
+        for url in ["https://[::ffff:127.0.0.1]/x", "https://[::ffff:c0a8:114]/x", "https://[0:0:0:0:0:0:0:1]/x", "https://0x7f.1/x"] {
+            guard case .deny(.ipLiteralNotAllowed) = try verdict(url) else { return XCTFail("\(url) must be denied as an IP literal") }
+        }
         // An exact rule can still name a private address deliberately.
         XCTAssertEqual(try verdict("https://10.0.0.5:8443/x"), .allow)
     }
@@ -71,6 +75,10 @@ final class NetworkRuleTests: XCTestCase {
         XCTAssertThrowsError(try HostRule.includingSubdomains(of: "10.0.0.1")) { error in
             XCTAssertEqual(error as? HostRuleError, .domainRuleOnIPLiteral("10.0.0.1"))
         }
+        XCTAssertThrowsError(try HostRule.includingSubdomains(of: "com")) { error in
+            XCTAssertEqual(error as? HostRuleError, .domainRuleTooBroad("com"))
+        }
+        XCTAssertNoThrow(try HostRule.exact("localhost")) // an exact single-label rule names one host
     }
 }
 
@@ -99,9 +107,15 @@ final class FileRuleTests: XCTestCase {
                        .deny(.outsideFileGrants("/App/Other/a.md")))
     }
 
-    func testTraversalIsNormalisedBeforeContainment() throws {
+    func testParentReferencesAreDeniedOutright() throws {
         let outcome = gate.evaluate(.file(path: "/App/Docs/../Secrets/key", access: .read), under: try manifest(), resolver: LexicalResolver())
-        XCTAssertEqual(outcome, .deny(.outsideFileGrants("/App/Secrets/key")))
+        XCTAssertEqual(outcome, .deny(.invalidPath(String(describing: PathError.parentReference("/App/Docs/../Secrets/key")))))
+        // The bypass this closes: `link/..` would collapse to a path inside the grant
+        // as text, while the kernel walks `..` from wherever the link points.
+        let resolver = SymlinkTableResolver(links: [try SandboxPath("/App/Docs/link"): try SandboxPath("/App/Secrets/inner")])
+        guard case .deny(.invalidPath) = gate.evaluate(.file(path: "/App/Docs/link/../key", access: .read), under: try manifest(), resolver: resolver) else {
+            return XCTFail("link/.. must be denied")
+        }
         if case .deny(.invalidPath) = gate.evaluate(.file(path: "Docs/a", access: .read), under: try manifest(), resolver: LexicalResolver()) {} else {
             XCTFail("relative paths must be denied as invalid")
         }
@@ -123,6 +137,42 @@ final class FileRuleTests: XCTestCase {
         let resolver = SymlinkTableResolver(links: [try SandboxPath("/App/Docs/Drafts/up"): try SandboxPath("/App/Docs")])
         let outcome = gate.evaluate(.file(path: "/App/Docs/Drafts/up/a.md", access: .write), under: try manifest(), resolver: resolver)
         XCTAssertEqual(outcome, .deny(.symlinkEscape(lexical: "/App/Docs/Drafts/up/a.md", resolved: "/App/Docs/a.md")))
+    }
+
+    func testDeepestGrantDecidesTheModeSoNestedReadOnlyStaysReadOnly() throws {
+        let m = CapabilityManifest(fileGrants: [try FileGrant("/W", .readWrite), try FileGrant("/W/Reference", .readOnly)])
+        XCTAssertEqual(gate.evaluate(.file(path: "/W/Reference/style.md", access: .write), under: m, resolver: LexicalResolver()),
+                       .deny(.writeNotGranted("/W/Reference/style.md")))
+        XCTAssertEqual(gate.evaluate(.file(path: "/W/Reference/style.md", access: .read), under: m, resolver: LexicalResolver()), .allow)
+        XCTAssertEqual(gate.evaluate(.file(path: "/W/notes.md", access: .write), under: m, resolver: LexicalResolver()), .allow)
+        // Writing through a link from the writable part into the nested read-only part.
+        let resolver = SymlinkTableResolver(links: [try SandboxPath("/W/ref-link"): try SandboxPath("/W/Reference")])
+        XCTAssertEqual(gate.evaluate(.file(path: "/W/ref-link/style.md", access: .write), under: m, resolver: resolver),
+                       .deny(.symlinkEscape(lexical: "/W/ref-link/style.md", resolved: "/W/Reference/style.md")))
+        // The same root listed twice with different modes: the restrictive one wins.
+        let dup = CapabilityManifest(fileGrants: [try FileGrant("/D", .readWrite), try FileGrant("/D", .readOnly)])
+        XCTAssertEqual(gate.evaluate(.file(path: "/D/x", access: .write), under: dup, resolver: LexicalResolver()), .deny(.writeNotGranted("/D/x")))
+    }
+
+    func testGrantRootThatIsItselfALinkIsJudgedByItsPhysicalLocation() throws {
+        let m = CapabilityManifest(fileGrants: [try FileGrant("/App/Current", .readWrite)])
+        let resolver = SymlinkTableResolver(links: [try SandboxPath("/App/Current"): try SandboxPath("/App/Versions/7")])
+        XCTAssertEqual(gate.evaluate(.file(path: "/App/Current/a.md", access: .write), under: m, resolver: resolver), .allow)
+    }
+
+    func testReviewSuffixOnTheLinkTargetIsFlaggedToo() throws {
+        let resolver = SymlinkTableResolver(links: [try SandboxPath("/App/Docs/notes.md"): try SandboxPath("/App/Docs/Drafts/session.token")])
+        let outcome = gate.evaluate(.file(path: "/App/Docs/notes.md", access: .read), under: try manifest(), resolver: resolver)
+        guard case .needsReview = outcome else { return XCTFail("a benign name linking to a flagged file must be reviewed, got \(outcome)") }
+    }
+
+    func testReviewReasonStaysBoundedForManyFlaggedResources() throws {
+        let resources = (0..<1_000).map { Resource.file(path: "/App/Docs/\($0).token", access: .read) }
+        guard case let .needsReview(why) = gate.evaluate(resources, under: try manifest(), resolver: LexicalResolver()) else {
+            return XCTFail("expected needsReview")
+        }
+        XCTAssertLessThan(why.count, 1_000)
+        XCTAssertTrue(why.hasSuffix("and 997 more"))
     }
 
     func testReviewSuffixIsCaseInsensitiveAndFlagsInsteadOfAllowing() throws {

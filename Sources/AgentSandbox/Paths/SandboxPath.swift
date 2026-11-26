@@ -2,19 +2,25 @@
 public enum PathError: Error, Equatable, Sendable {
     case notAbsolute(String)
     case containsNUL
-    case traversesAboveRoot(String)
+    /// The path contains a `..` component. See `SandboxPath` for why these are
+    /// rejected rather than collapsed.
+    case parentReference(String)
     case tooLong
     case tooManyComponents
 }
 
-/// An absolute, lexically normalised path: no `.`, no `..`, no empty components.
+/// An absolute path with no `.`, no `..` and no empty components.
+///
+/// **`..` is rejected, not collapsed.** Collapsing `a/link/../b` to `a/b` as text
+/// is only correct when nothing on the way is a symlink: the kernel applies `..`
+/// *after* following `link`, so `Workspace/cache-link/../Preferences` opens a
+/// directory next to wherever `cache-link` points, not next to `cache-link`. A
+/// gate that collapses first and resolves second can be walked straight out of.
+/// An agent never needs `..` to name a file inside its grants, so the safe rule
+/// is also the simple one. (`.` and repeated slashes are harmless and are dropped.)
 ///
 /// Containment is decided component by component, never by string prefix, so
 /// `/Workspace-backup` is not inside `/Workspace`.
-///
-/// A `..` that would climb above `/` is rejected rather than clamped to `/` the
-/// way POSIX does: an agent that writes `/../../etc` is probing, and the gate
-/// should say so instead of quietly reinterpreting the request.
 public struct SandboxPath: Hashable, Sendable, CustomStringConvertible {
     public static let maxLength = 4096
     public static let maxComponents = 256
@@ -26,23 +32,22 @@ public struct SandboxPath: Hashable, Sendable, CustomStringConvertible {
         guard !raw.utf8.contains(0) else { throw PathError.containsNUL }
         guard raw.hasPrefix("/") else { throw PathError.notAbsolute(raw.clamped(to: 80)) }
 
-        var normalised: [String] = []
+        var parts: [String] = []
         for part in raw.split(separator: "/", omittingEmptySubsequences: true) {
             switch part {
             case ".":
                 continue
             case "..":
-                guard !normalised.isEmpty else { throw PathError.traversesAboveRoot(raw.clamped(to: 80)) }
-                normalised.removeLast()
+                throw PathError.parentReference(raw.clamped(to: 80))
             default:
-                normalised.append(String(part))
-                guard normalised.count <= Self.maxComponents else { throw PathError.tooManyComponents }
+                parts.append(String(part))
+                guard parts.count <= Self.maxComponents else { throw PathError.tooManyComponents }
             }
         }
-        components = normalised
+        components = parts
     }
 
-    /// Trusted construction from components that are already normalised.
+    /// Trusted construction from components that already satisfy the invariants.
     init(normalisedComponents: [String]) {
         components = normalisedComponents
     }

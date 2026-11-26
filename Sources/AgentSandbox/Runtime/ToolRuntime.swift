@@ -46,7 +46,9 @@ public enum CallOutcome: Sendable, Equatable {
     case executed(output: String)
     case denied(DenialReason)
     case gapReported(BoundaryGapReport)
-    /// The call never reached the gate: bad arguments for a known tool.
+    /// The call never reached the gate: bad arguments for a known tool. The
+    /// string is safe to show the model (a missing-argument message, or a generic
+    /// one); the tool's full error stays in the audit trail.
     case rejected(String)
     /// Allowed, ran, and the tool itself threw.
     case failed(String)
@@ -61,7 +63,7 @@ public enum CallOutcome: Sendable, Equatable {
         switch self {
         case let .executed(output): return output
         case let .denied(reason): return reason.agentFacingMessage
-        case let .gapReported(report): return "Recorded boundary gap #\(report.sequence). A person will review it. Continue with what you can do inside the sandbox."
+        case let .gapReported(report): return "Recorded boundary gap (audit entry \(report.sequence)). A person will review it. Continue with what you can do inside the sandbox."
         case let .rejected(why): return "Rejected: \(why)."
         case .failed: return "The tool failed."
         }
@@ -75,6 +77,8 @@ public struct AuditEntry: Sendable, Equatable {
         /// An access requested from inside a running tool.
         case duringRun
         case report
+        /// The tool ran and then threw.
+        case afterRun
     }
 
     public enum Verdict: Sendable, Equatable {
@@ -134,6 +138,10 @@ public actor ToolRuntime {
     public nonisolated let lockout: LockoutPolicy
 
     private var denials = 0
+    /// Calls whose tool body is running. `ToolContext.authorize(_:)` is refused for
+    /// any other token, so a context smuggled out of its call is inert.
+    private var activeRuns: Set<UInt64> = []
+    private var nextRunToken: UInt64 = 0
     private var sequence: UInt64 = 0
     private var audit: BoundedLog<AuditEntry>
     private var reports: BoundedLog<BoundaryGapReport>
@@ -214,9 +222,12 @@ public actor ToolRuntime {
 
         let resources: [Resource]
         do { resources = try tool.declaredResources(for: call.arguments) } catch {
-            let why = String(describing: error)
+            let why = String(describing: error).clamped(to: 200)
             record(call, .beforeRun, detail: "arguments", .rejected(why))
-            return .rejected(why)
+            // Only argument errors are echoed to the model; anything else a tool's
+            // resource closure throws could carry details the agent should not see.
+            let agentSafe = (error as? ToolArgumentError)?.description ?? "invalid arguments for \(tool.name)"
+            return .rejected(agentSafe)
         }
 
         let startEpoch = epoch
@@ -239,12 +250,27 @@ public actor ToolRuntime {
             if case let .deny(why) = decision {
                 return deny(call, .classifierDenied(why.clamped(to: 200)), phase: .beforeRun, detail: detail)
             }
+            // The rules depend on the resolver (the file system), which may have
+            // changed while the call was parked. The classifier approved one verdict;
+            // run anything else and it is unreviewed.
+            switch evaluator.evaluate(resources, under: manifest, resolver: resolver) {
+            case .needsReview(why):
+                break
+            case let .deny(reason):
+                return deny(call, reason, phase: .beforeRun, detail: detail)
+            case .allow, .needsReview:
+                return deny(call, .verdictChangedDuringReview, phase: .beforeRun, detail: detail)
+            }
         case .allow:
             break
         }
 
         record(call, .beforeRun, detail: detail, .allowed)
-        let context = ToolContext(callID: call.id, toolName: call.tool, runtime: self)
+        nextRunToken &+= 1 // UInt64: wrapping is unreachable in practice
+        let token = nextRunToken
+        activeRuns.insert(token)
+        defer { activeRuns.remove(token) }
+        let context = ToolContext(callID: call.id, toolName: call.tool, runToken: token, runtime: self)
         do {
             let output = try await tool.run(call.arguments, context: context)
             return .executed(output: output)
@@ -253,13 +279,17 @@ public actor ToolRuntime {
             return .denied(denial.reason)
         } catch {
             let why = String(describing: error).clamped(to: 200)
-            record(call, .beforeRun, detail: detail, .failed(why))
+            record(call, .afterRun, detail: detail, .failed(why))
             return .failed(why)
         }
     }
 
-    func authorizeDuringRun(_ resource: Resource, callID: String, toolName: String) throws {
+    func authorizeDuringRun(_ resource: Resource, callID: String, toolName: String, runToken: UInt64) throws {
         let call = ToolCall(id: callID, tool: toolName)
+        guard activeRuns.contains(runToken) else {
+            _ = deny(call, .callNotActive, phase: .duringRun, detail: resource.description)
+            throw SandboxDenial(reason: .callNotActive)
+        }
         if isLocked {
             let reason = DenialReason.sessionLocked(denials: denials)
             _ = deny(call, reason, phase: .duringRun, detail: resource.description)
@@ -280,7 +310,8 @@ public actor ToolRuntime {
 
     // MARK: Recording
 
-    private func deny(_ call: ToolCall, _ reason: DenialReason, phase: AuditEntry.Phase, detail: String = "") -> CallOutcome {
+    private func deny(_ call: ToolCall, _ unclamped: DenialReason, phase: AuditEntry.Phase, detail: String = "") -> CallOutcome {
+        let reason = unclamped.clamped()
         if reason.countsTowardLockout { denials = denials.saturatingAdd(1) }
         record(call, phase, detail: detail, .denied(reason))
         return .denied(reason)

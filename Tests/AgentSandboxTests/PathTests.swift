@@ -4,16 +4,19 @@ import XCTest
 
 final class SandboxPathTests: XCTestCase {
     func testNormalisesDotsAndDuplicateSlashes() throws {
-        XCTAssertEqual(try SandboxPath("/a//b/./c/../d/").string, "/a/b/d")
+        XCTAssertEqual(try SandboxPath("/a//b/./c/d/").string, "/a/b/c/d")
         XCTAssertEqual(try SandboxPath("/").string, "/")
         XCTAssertEqual(try SandboxPath("/").components, [])
     }
 
-    func testRejectsTraversalAboveRootInsteadOfClamping() {
-        XCTAssertThrowsError(try SandboxPath("/a/../../etc/passwd")) { error in
-            XCTAssertEqual(error as? PathError, .traversesAboveRoot("/a/../../etc/passwd"))
+    func testRejectsEveryParentReferenceInsteadOfCollapsingIt() {
+        // Collapsing `link/..` as text is wrong once links exist; see SandboxPath.
+        XCTAssertThrowsError(try SandboxPath("/a/../b")) { error in
+            XCTAssertEqual(error as? PathError, .parentReference("/a/../b"))
         }
+        XCTAssertThrowsError(try SandboxPath("/a/../../etc/passwd"))
         XCTAssertThrowsError(try SandboxPath("/.."))
+        XCTAssertNoThrow(try SandboxPath("/a/..b/c..")) // only an exact `..` component is a parent reference
     }
 
     func testRejectsRelativeNULAndOversizedInput() {
@@ -76,6 +79,18 @@ final class ResolverTests: XCTestCase {
             XCTAssertTrue(resolved.isWithin(physicalOutside), "\(name) -> \(resolved)")
             XCTAssertFalse(resolved.isWithin(physicalWorkspace), "\(name) -> \(resolved)")
         }
+        // A relative link whose target walks `..` through ANOTHER link: the kernel
+        // applies that `..` after following `s`, so `a` lands beside the outside
+        // directory, not inside the workspace. Text-collapsing `s/../x` would say
+        // `Workspace/x` and wave it through.
+        let deep = outside.appendingPathComponent("deep")
+        try fm.createDirectory(at: deep, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: workspace.appendingPathComponent("s").path, withDestinationPath: deep.path)
+        try fm.createSymbolicLink(atPath: workspace.appendingPathComponent("a").path, withDestinationPath: "s/../x")
+        let viaParent = try resolver.resolve(SandboxPath(workspace.path + "/a"))
+        XCTAssertEqual(viaParent, SandboxPath(normalisedComponents: physicalOutside.components + ["x"]))
+        XCTAssertFalse(viaParent.isWithin(physicalWorkspace))
+
         // A file that does not exist yet keeps its literal tail.
         let fresh = try resolver.resolve(SandboxPath(workspace.path + "/new/file.txt"))
         XCTAssertEqual(fresh.components.suffix(2), ["new", "file.txt"])

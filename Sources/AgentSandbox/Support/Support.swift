@@ -9,6 +9,13 @@ extension Int {
         guard overflow else { return result }
         return other > 0 ? .max : .min
     }
+
+    /// Multiplication that clamps instead of trapping.
+    func saturatingMultiply(_ other: Int) -> Int {
+        let (result, overflow) = multipliedReportingOverflow(by: other)
+        guard overflow else { return result }
+        return (self < 0) == (other < 0) ? .max : .min
+    }
 }
 
 extension String {

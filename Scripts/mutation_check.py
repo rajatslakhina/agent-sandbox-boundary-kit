@@ -3,11 +3,12 @@
 named test FAILS. A guard whose mutant still passes its test is not tested.
 
 Run from the package root: python3 Scripts/mutation_check.py
-Each mutant is applied to a pristine copy of the file and reverted afterwards,
-even if the run is interrupted.
+Each mutant is applied to the file and reverted in a `finally`, including on
+Ctrl-C or SIGTERM.
 """
 import pathlib
 import re
+import signal
 import subprocess
 import sys
 
@@ -22,11 +23,53 @@ MUTANTS = [
         "SandboxPathTests/testContainmentIsByComponentNotStringPrefix",
     ),
     (
+        "`..` collapsed as text instead of rejected",
+        SRC / "Paths/SandboxPath.swift",
+        "throw PathError.parentReference(raw.clamped(to: 80))",
+        "if !parts.isEmpty { parts.removeLast() }",
+        "FileRuleTests/testParentReferencesAreDeniedOutright",
+    ),
+    (
+        "link targets collapsed as text",
+        SRC / "Paths/PathResolving.swift",
+        "pending = (target + Array(pending))[...]",
+        "var collapsed: [String] = []; for t in target { if t == \"..\" { if !collapsed.isEmpty { collapsed.removeLast() } } else if t != \".\" { collapsed.append(t) } }; pending = (collapsed + Array(pending))[...]",
+        "ResolverTests/testFileSystemResolverFollowsRealAbsoluteAndRelativeLinks",
+    ),
+    (
         "symlink target not checked",
         SRC / "Policy/PolicyGate.swift",
-        "return physical.isWithin(physicalRoot)",
-        "return physicalRoot == physicalRoot",
+        "Self.decidingGrant(for: physical, among: physicalRoots)",
+        "Self.decidingGrant(for: lexical, among: physicalRoots)",
         "FileRuleTests/testSymlinkPointingOutsideIsDeniedEvenThoughLexicalPathIsInside",
+    ),
+    (
+        "shallowest grant decides the mode",
+        SRC / "Policy/PolicyGate.swift",
+        "if depth > current.depth ||",
+        "if depth < current.depth ||",
+        "FileRuleTests/testDeepestGrantDecidesTheModeSoNestedReadOnlyStaysReadOnly",
+    ),
+    (
+        "grant roots not resolved",
+        SRC / "Policy/PolicyGate.swift",
+        "(try? resolver.resolve(grant.root)).map { (grant, $0) }",
+        "Optional(grant.root).map { (grant, $0) }",
+        "FileRuleTests/testGrantRootThatIsItselfALinkIsJudgedByItsPhysicalLocation",
+    ),
+    (
+        "review suffix ignored",
+        SRC / "Policy/PolicyGate.swift",
+        "guard flagged.isEmpty else {",
+        "guard flagged.isEmpty || true else {",
+        "FileRuleTests/testReviewSuffixIsCaseInsensitiveAndFlagsInsteadOfAllowing",
+    ),
+    (
+        "review suffix checked on the lexical name only",
+        SRC / "Policy/PolicyGate.swift",
+        "[lexical.lastComponent, physical.lastComponent]",
+        "[lexical.lastComponent]",
+        "FileRuleTests/testReviewSuffixOnTheLinkTargetIsFlaggedToo",
     ),
     (
         "subdomain match without a label boundary",
@@ -57,23 +100,39 @@ MUTANTS = [
         "ToolRuntimeTests/testSessionLockedDuringReviewDeniesTheParkedCall",
     ),
     (
-        "host-caused denials count toward lockout",
-        SRC / "Policy/Resource.swift",
-        "case .classifierUnavailable, .manifestChanged, .sessionLocked: return false",
-        "case .classifierUnavailable, .manifestChanged, .sessionLocked: return true",
-        "ToolRuntimeTests/testClassifierAllowDenyAndThrow",
+        "rules not re-run after review",
+        SRC / "Runtime/ToolRuntime.swift",
+        "switch evaluator.evaluate(resources, under: manifest, resolver: resolver) {\n            case .needsReview(why):",
+        "switch RuleOutcome.needsReview(why) {\n            case .needsReview(why):",
+        "ToolRuntimeTests/testSymlinkSwappedWhileParkedInReviewIsCaughtByTheRecheck",
     ),
     (
-        "review suffix ignored",
-        SRC / "Policy/PolicyGate.swift",
-        "guard flagged.isEmpty else {",
-        "guard flagged.isEmpty || true else {",
-        "FileRuleTests/testReviewSuffixIsCaseInsensitiveAndFlagsInsteadOfAllowing",
+        "flagged access allowed mid-run",
+        SRC / "Runtime/ToolRuntime.swift",
+        "case let .needsReview(why):\n            let reason = DenialReason.reviewUnavailable(why)\n            _ = deny(call, reason, phase: .duringRun, detail: resource.description)\n            throw SandboxDenial(reason: reason)",
+        "case .needsReview:\n            record(call, .duringRun, detail: resource.description, .allowed)",
+        "ToolRuntimeTests/testFlaggedAccessDuringRunIsDeniedAndCounted",
+    ),
+    (
+        "smuggled context still authorizes",
+        SRC / "Runtime/ToolRuntime.swift",
+        "guard activeRuns.contains(runToken) else {",
+        "guard activeRuns.contains(runToken) || true else {",
+        "ToolRuntimeTests/testContextSmuggledOutOfItsCallIsInert",
+    ),
+    (
+        "host-caused denials count toward lockout",
+        SRC / "Policy/Resource.swift",
+        "case .classifierUnavailable, .manifestChanged, .verdictChangedDuringReview, .callNotActive, .sessionLocked:\n            return false",
+        "case .classifierUnavailable, .manifestChanged, .verdictChangedDuringReview, .callNotActive, .sessionLocked:\n            return true",
+        "ToolRuntimeTests/testClassifierAllowDenyAndThrow",
     ),
 ]
 
 
 def main() -> int:
+    # Turn SIGTERM into an exception so the `finally` below restores the file.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(130))
     survivors = []
     for name, path, old, new, test in MUTANTS:
         original = path.read_text()

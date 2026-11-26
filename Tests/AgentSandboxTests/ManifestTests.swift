@@ -12,17 +12,18 @@ final class ManifestDigestTests: XCTestCase {
         )
     }
 
-    func testEmptyManifestDigestMatchesIndependentlyComputedLiteral() throws {
+    func testDigestsMatchIndependentlyComputedLiterals() throws {
         // Pinned so a change to the canonical encoding is a visible, reviewed diff:
         // a digest that silently changed would make old audit trails unverifiable.
-        XCTAssertEqual(try base().digest.count, 16)
-        XCTAssertEqual(try base().digest, try base().digest)
         XCTAssertEqual(CapabilityManifest().digest, Self.emptyManifestDigest)
+        XCTAssertEqual(try base().digest, Self.baseManifestDigest)
     }
 
     /// FNV-1a 64 of the v1 canonical encoding of an empty manifest, computed by an
     /// independent Python implementation of the same encoding (not by this code).
     static let emptyManifestDigest = "395632dca3b560e9"
+    /// Same independent computation, for `base()`.
+    static let baseManifestDigest = "6c1aa73acacba2d2"
 
     func testDigestIgnoresInsertionOrder() throws {
         var a = try base()

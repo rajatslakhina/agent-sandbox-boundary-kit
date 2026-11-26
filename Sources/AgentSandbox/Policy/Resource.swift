@@ -56,14 +56,49 @@ public enum DenialReason: Hashable, Sendable, CustomStringConvertible {
     case classifierUnavailable
     /// The manifest was replaced while this call was suspended in review.
     case manifestChanged
+    /// The deterministic rules, re-run after review, no longer give the verdict
+    /// that was reviewed (for example a symlink changed while the call was parked).
+    case verdictChangedDuringReview
+    /// A tool called `ToolContext.authorize(_:)` after its call had finished.
+    case callNotActive
     case sessionLocked(denials: Int)
 
+    /// The same reason with every string payload clamped, so an audit entry stays
+    /// bounded however long the offending input was.
+    public func clamped(to limit: Int = 300) -> DenialReason {
+        switch self {
+        case let .unknownTool(s): return .unknownTool(s.clamped(to: limit))
+        case let .invalidPath(s): return .invalidPath(s.clamped(to: limit))
+        case let .outsideFileGrants(s): return .outsideFileGrants(s.clamped(to: limit))
+        case let .writeNotGranted(s): return .writeNotGranted(s.clamped(to: limit))
+        case let .symlinkEscape(l, r): return .symlinkEscape(lexical: l.clamped(to: limit), resolved: r.clamped(to: limit))
+        case let .resolutionFailed(s): return .resolutionFailed(s.clamped(to: limit))
+        case let .schemeNotAllowed(s): return .schemeNotAllowed(s.clamped(to: limit))
+        case let .malformedURL(s): return .malformedURL(s.clamped(to: limit))
+        case let .localNetwork(h, k): return .localNetwork(host: h.clamped(to: limit), kind: k)
+        case let .ipLiteralNotAllowed(s): return .ipLiteralNotAllowed(s.clamped(to: limit))
+        case let .hostNotAllowed(s): return .hostNotAllowed(s.clamped(to: limit))
+        case let .portNotAllowed(h, p): return .portNotAllowed(host: h.clamped(to: limit), port: p)
+        case let .keychainForbidden(s): return .keychainForbidden(s.clamped(to: limit))
+        case let .appGroupForbidden(s): return .appGroupForbidden(s.clamped(to: limit))
+        case let .reviewUnavailable(s): return .reviewUnavailable(s.clamped(to: limit))
+        case let .classifierDenied(s): return .classifierDenied(s.clamped(to: limit))
+        case .credentialsInURL, .classifierUnavailable, .manifestChanged, .verdictChangedDuringReview,
+             .callNotActive, .sessionLocked:
+            return self
+        }
+    }
+
     /// Whether this denial is the agent's doing and so counts toward lockout.
-    /// Denials caused by the host app (a manifest swap, a failing classifier) or
-    /// by the lock itself do not.
+    /// Denials caused by the host app or its tools (a manifest swap, a failing
+    /// classifier, a verdict that changed during review, a tool authorizing after
+    /// its call ended) or by the lock itself do not. A flagged resource with no
+    /// classifier configured (`reviewUnavailable`) does count: the agent asked
+    /// for something the host chose not to offer a review path for.
     public var countsTowardLockout: Bool {
         switch self {
-        case .classifierUnavailable, .manifestChanged, .sessionLocked: return false
+        case .classifierUnavailable, .manifestChanged, .verdictChangedDuringReview, .callNotActive, .sessionLocked:
+            return false
         default: return true
         }
     }
@@ -81,8 +116,8 @@ public enum DenialReason: Hashable, Sendable, CustomStringConvertible {
             return .network
         case .keychainForbidden: return .credentials
         case .appGroupForbidden: return .sharedContainers
-        case .unknownTool: return .tools
-        case .reviewUnavailable, .classifierDenied, .classifierUnavailable: return .review
+        case .unknownTool, .callNotActive: return .tools
+        case .reviewUnavailable, .classifierDenied, .classifierUnavailable, .verdictChangedDuringReview: return .review
         case .manifestChanged, .sessionLocked: return .session
         }
     }
@@ -115,6 +150,8 @@ public enum DenialReason: Hashable, Sendable, CustomStringConvertible {
         case let .classifierDenied(why): return "classifier denied: \(why)"
         case .classifierUnavailable: return "classifier failed; failing closed"
         case .manifestChanged: return "manifest changed during review"
+        case .verdictChangedDuringReview: return "rules gave a different verdict after review"
+        case .callNotActive: return "authorize called after the call finished"
         case let .sessionLocked(denials): return "session locked after \(denials) denials"
         }
     }

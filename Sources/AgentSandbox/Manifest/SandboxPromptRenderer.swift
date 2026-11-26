@@ -30,7 +30,7 @@ public enum SandboxPromptRenderer {
                 lines.append("   - \(grant.root.string) (\(grant.mode == .readWrite ? "read and write" : "read only"))")
             }
         }
-        lines.append("   Everything else on the device is outside the sandbox, including caches, other directories of this app and paths reached through links.")
+        lines.append("   Everything else on the device is outside the sandbox, including caches, other directories of this app, and anything a link inside these directories points to.")
         let suffixes = manifest.reviewSuffixes.sorted()
         if !suffixes.isEmpty {
             lines.append("   Files ending in \(suffixes.joined(separator: ", ")) need an extra review even inside these directories.")

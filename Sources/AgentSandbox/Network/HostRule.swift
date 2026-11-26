@@ -5,6 +5,9 @@ public enum HostRuleError: Error, Equatable, Sendable {
     case invalidHost(String)
     case invalidPort(Int)
     case domainRuleOnIPLiteral(String)
+    /// A subdomain rule on a single-label name (`com`, `localhost`) would grant
+    /// every host under it.
+    case domainRuleTooBroad(String)
 }
 
 /// One allowed network destination. HTTPS only, by design: the manifest has no
@@ -29,6 +32,9 @@ public struct HostRule: Hashable, Sendable, Comparable, CustomStringConvertible 
     public static func includingSubdomains(of host: String, port: Int = 443) throws -> HostRule {
         let rule = try HostRule(host: host, port: port, match: .includingSubdomains)
         guard !HostClassifier.isIPLiteral(rule.host) else { throw HostRuleError.domainRuleOnIPLiteral(rule.host) }
+        // Single-label names are refused. Multi-label public suffixes (`github.io`,
+        // `co.uk`) are not detected: no public-suffix list ships here. See README limits.
+        guard rule.host.contains(".") else { throw HostRuleError.domainRuleTooBroad(rule.host) }
         return rule
     }
 

@@ -60,8 +60,11 @@ public struct SymlinkTableResolver: PathResolving {
 
 /// Resolves symlinks on the real file system, one component at a time, the way
 /// the kernel walks a path. Components that do not exist yet (a file about to be
-/// written) are kept literally. Relative link targets resolve against the link's
-/// parent directory; `..` in a target that climbs above `/` fails closed.
+/// written) are kept literally.
+///
+/// Link targets are walked raw, not collapsed as text: a `..` inside a target
+/// pops the already-resolved (physical) prefix, exactly as the kernel does after
+/// following the link. A `..` that would climb above `/` fails closed.
 public struct FileSystemResolver: PathResolving {
     public let maxHops: Int
 
@@ -71,34 +74,54 @@ public struct FileSystemResolver: PathResolving {
 
     public func resolve(_ path: SandboxPath) throws -> SandboxPath {
         let fileManager = FileManager.default
-        var resolved: [String] = []
-        var pending = path.components[...]
+        var resolved: [String] = []           // physical components so far
+        var pending = path.components[...]    // raw components still to walk
         var hops = 0
+        var steps = 0
+        // Each hop can queue at most 2 * maxComponents raw components, so this bounds the walk.
+        let maxSteps = maxHops.saturatingAdd(1).saturatingMultiply(SandboxPath.maxComponents * 2 + 1)
 
         while let component = pending.first {
             pending = pending.dropFirst()
+            steps = steps.saturatingAdd(1)
+            guard steps <= maxSteps else { throw ResolutionError.tooManyLinks(path.string) }
+
+            switch component {
+            case "", ".":
+                continue
+            case "..":
+                guard !resolved.isEmpty else { throw ResolutionError.invalidLinkTarget(path.string) }
+                resolved.removeLast()
+                continue
+            default:
+                break
+            }
+
             let candidate = "/" + (resolved + [component]).joined(separator: "/")
             // destinationOfSymbolicLink throws for anything that is not a link
             // (including paths that do not exist), which is exactly "keep literally".
             guard let destination = try? fileManager.destinationOfSymbolicLink(atPath: candidate) else {
                 resolved.append(component)
+                guard resolved.count <= SandboxPath.maxComponents else {
+                    throw ResolutionError.invalidLinkTarget(path.string)
+                }
                 continue
             }
             hops = hops.saturatingAdd(1)
             guard hops <= maxHops else { throw ResolutionError.tooManyLinks(path.string) }
+            guard destination.utf8.count <= SandboxPath.maxLength, !destination.utf8.contains(0) else {
+                throw ResolutionError.invalidLinkTarget(candidate)
+            }
 
-            let base = destination.hasPrefix("/")
-                ? destination
-                : "/" + resolved.joined(separator: "/") + "/" + destination
-            let target: SandboxPath
-            do { target = try SandboxPath(base) } catch {
+            let target = destination.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+            guard target.count + pending.count <= SandboxPath.maxComponents * 2 else {
                 throw ResolutionError.invalidLinkTarget(candidate)
             }
-            guard target.components.count + pending.count <= SandboxPath.maxComponents else {
-                throw ResolutionError.invalidLinkTarget(candidate)
-            }
-            resolved = []
-            pending = (target.components + Array(pending))[...]
+            // Absolute target: restart from "/". Relative target: resolve against the
+            // link's parent, which is `resolved` as it stands (the link itself was
+            // never appended).
+            if destination.hasPrefix("/") { resolved = [] }
+            pending = (target + Array(pending))[...]
         }
         return SandboxPath(normalisedComponents: resolved)
     }

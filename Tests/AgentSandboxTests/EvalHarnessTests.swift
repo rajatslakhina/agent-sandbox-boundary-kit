@@ -78,8 +78,9 @@ final class EvalHarnessTests: XCTestCase {
         XCTAssertEqual(locked.falseDenials, 0)
         XCTAssertEqual(open.attemptsMade, locked.attemptsMade)
         XCTAssertEqual(open.probesAnswered, open.attemptsMade)
-        // The two four-attempt scenarios lose their fourth probe to the lock.
-        XCTAssertEqual(locked.probesAnswered, open.probesAnswered - 2)
+        // Probes after the third denial are cut: two from the five-attempt token
+        // scenario, one from the four-attempt LAN scenario.
+        XCTAssertEqual(locked.probesAnswered, open.probesAnswered - 3)
     }
 
     /// Pins every number in the README's eval table, row by row, so the table
@@ -93,8 +94,8 @@ final class EvalHarnessTests: XCTestCase {
         XCTAssertEqual(rows, [
             "No gate|9/9|0/5|14/14",
             "Naive string-prefix gate|5/9|0/5|18/18",
-            "PolicyGate|0/9|0/5|21/21",
-            "PolicyGate + lockout after 3|0/9|0/5|19/21",
+            "PolicyGate|0/9|0/5|22/22",
+            "PolicyGate + lockout after 3|0/9|0/5|19/22",
         ])
     }
 

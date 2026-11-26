@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import AgentSandbox
 
@@ -19,6 +20,30 @@ struct ParkedClassifier: CallClassifier {
         for await _ in release { break }
         return decision
     }
+}
+
+/// A resolver whose link table the test can swap while a call is parked.
+final class SwitchableResolver: PathResolving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var table: SymlinkTableResolver
+
+    init(_ links: [SandboxPath: SandboxPath]) { table = SymlinkTableResolver(links: links) }
+
+    func swap(to links: [SandboxPath: SandboxPath]) {
+        lock.lock(); defer { lock.unlock() }
+        table = SymlinkTableResolver(links: links)
+    }
+
+    func resolve(_ path: SandboxPath) throws -> SandboxPath {
+        lock.lock(); defer { lock.unlock() }
+        return try table.resolve(path)
+    }
+}
+
+/// Holds a context a misbehaving tool smuggled out of its call.
+actor ContextStash {
+    var context: ToolContext?
+    func keep(_ c: ToolContext) { context = c }
 }
 
 struct ThrowingClassifier: CallClassifier {
@@ -124,6 +149,85 @@ final class ToolRuntimeTests: XCTestCase {
         XCTAssertEqual(outcome, .rejected("missing argument 'path'"))
         let locked = await runtime.isLocked
         XCTAssertFalse(locked)
+    }
+
+    func testNonArgumentErrorsFromAToolAreNotEchoedToTheModel() async throws {
+        struct Leaky: Error, CustomStringConvertible { var description: String { "/private/var/secret/path not found" } }
+        let tool = DeclarativeTool(name: "leaky", summary: "", resources: { _ in throw Leaky() }, body: { _, _ in "" })
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [tool])
+        let outcome = await runtime.execute(ToolCall(id: "l", tool: "leaky"))
+        XCTAssertEqual(outcome, .rejected("invalid arguments for leaky"))
+        let audit = await runtime.snapshot().audit
+        XCTAssertEqual(audit.last?.verdict, .rejected("/private/var/secret/path not found"), "the audit keeps the real error")
+    }
+
+    func testToolThatThrowsAfterRunningIsAuditedAsAfterRun() async throws {
+        struct Boom: Error {}
+        let tool = DeclarativeTool(name: "boom", summary: "", resources: { _ in [] }, body: { _, _ in throw Boom() })
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [tool])
+        let outcome = await runtime.execute(ToolCall(id: "b", tool: "boom"))
+        guard case .failed = outcome else { return XCTFail("got \(outcome)") }
+        let audit = await runtime.snapshot().audit
+        XCTAssertEqual(audit.map(\.phase), [.beforeRun, .afterRun])
+    }
+
+    func testFlaggedAccessDuringRunIsDeniedAndCounted() async throws {
+        let tool = DeclarativeTool(
+            name: "peek", summary: "", resources: { _ in [] },
+            body: { _, context in try await context.authorize(.file(path: "/W/session.token", access: .read)); return "peeked" }
+        )
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [tool],
+                                      classifier: ToolTrustClassifier(trustedTools: ["peek"]), lockout: LockoutPolicy(maxDenials: 1))
+        let outcome = await runtime.execute(ToolCall(id: "p", tool: "peek"))
+        guard case .denied(.reviewUnavailable) = outcome else { return XCTFail("review is only offered up front; got \(outcome)") }
+        let locked = await runtime.isLocked
+        XCTAssertTrue(locked)
+    }
+
+    func testContextSmuggledOutOfItsCallIsInert() async throws {
+        let stash = ContextStash()
+        let tool = DeclarativeTool(name: "smuggle", summary: "", resources: { _ in [] },
+                                   body: { _, context in await stash.keep(context); return "done" })
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [tool], lockout: LockoutPolicy(maxDenials: 1))
+        _ = await runtime.execute(ToolCall(id: "s", tool: "smuggle"))
+        guard let late = await stash.context else { return XCTFail("tool did not run") }
+        do {
+            try await late.authorize(.file(path: "/W/inside.md", access: .read)) // would be allowed during the call
+            XCTFail("authorize after the call ended must throw")
+        } catch let denial as SandboxDenial {
+            XCTAssertEqual(denial.reason, .callNotActive)
+        }
+        let snap = await runtime.snapshot()
+        XCTAssertFalse(snap.isLocked, "a tool bug is not the agent's denial")
+        XCTAssertFalse(snap.audit.contains { $0.phase == .duringRun && $0.verdict == .allowed })
+    }
+
+    func testSymlinkSwappedWhileParkedInReviewIsCaughtByTheRecheck() async throws {
+        let counter = RunCounter()
+        let (enteredStream, entered) = AsyncStream<Void>.makeStream()
+        let (release, releaser) = AsyncStream<Void>.makeStream()
+        let resolver = SwitchableResolver([:])
+        let runtime = try ToolRuntime(
+            manifest: try manifest(), tools: [readTool(counter)], resolver: resolver,
+            classifier: ParkedClassifier(entered: entered, release: release, decision: .allow)
+        )
+        let parked = read("/W/link/session.token")
+        let call = Task { await runtime.execute(parked) }
+        for await _ in enteredStream { break }
+        resolver.swap(to: [try SandboxPath("/W/link"): try SandboxPath("/Secrets")]) // the attacker repoints the link
+        releaser.yield()
+        let outcome = await call.value
+        XCTAssertEqual(outcome, .denied(.symlinkEscape(lexical: "/W/link/session.token", resolved: "/Secrets/session.token")))
+        let runs = await counter.runs
+        XCTAssertEqual(runs, 0)
+    }
+
+    func testAuditedDenialReasonsAreClamped() async throws {
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [readTool(RunCounter())], lockout: .disabled)
+        let longPath = "/" + Array(repeating: "segment", count: 200).joined(separator: "/")
+        let outcome = await runtime.execute(read(longPath))
+        guard case let .denied(.outsideFileGrants(shown)) = outcome else { return XCTFail("got \(outcome)") }
+        XCTAssertEqual(shown.count, 300)
     }
 
     func testConfigurationErrors() throws {
@@ -232,9 +336,16 @@ final class ToolRuntimeTests: XCTestCase {
         XCTAssertEqual(snap.denials, 5)
         XCTAssertTrue(snap.isLocked)
         let runs = await counter.runs
-        let allowedEntries = snap.audit.filter { $0.verdict == .allowed }.count
-        XCTAssertEqual(runs, allowedEntries, "every run was audited as allowed, and nothing ran unaudited")
-        XCTAssertLessThan(runs, 40, "once locked, allowed calls stop running too")
+        let allowed = snap.audit.filter { $0.verdict == .allowed }
+        XCTAssertEqual(runs, allowed.count, "every run was audited as allowed, and nothing ran unaudited")
+        // Whatever the interleaving, nothing is allowed after the denial that locked the session.
+        let counted = snap.audit.filter {
+            if case let .denied(reason) = $0.verdict { return reason.countsTowardLockout }
+            return false
+        }
+        XCTAssertEqual(counted.count, 5)
+        guard let lockingSequence = counted.last?.sequence else { return XCTFail("no locking denial") }
+        XCTAssertTrue(allowed.allSatisfy { $0.sequence < lockingSequence })
     }
 
     func testDuringRunAuthorizationUsesTheCurrentManifestAndCounts() async throws {
