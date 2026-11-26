@@ -308,10 +308,46 @@ final class ToolRuntimeTests: XCTestCase {
                                     body: { _, _ in "" })
         let runtime = try ToolRuntime(manifest: try manifest(), tools: [fetch])
         _ = await runtime.execute(ToolCall(id: "c", tool: "http_get", arguments: ["url": "https://alice:hunter2@api.example.com/v1"]))
+        // Unparseable (non-numeric port) with credentials: denied as malformed, and still redacted.
+        let outcome = await runtime.execute(ToolCall(id: "d", tool: "http_get", arguments: ["url": "https://alice:hunter2@api.example.com:abc/"]))
+        guard case .denied(.malformedURL) = outcome else { return XCTFail("got \(outcome)") }
+        XCTAssertFalse(String(describing: outcome).contains("hunter2"))
         let audit = await runtime.snapshot().audit
-        XCTAssertEqual(audit.count, 1)
+        XCTAssertEqual(audit.count, 2)
         XCTAssertFalse(audit.contains { $0.detail.contains("hunter2") || $0.detail.contains("alice") })
+        XCTAssertFalse(audit.contains { String(describing: $0.verdict).contains("hunter2") })
         XCTAssertTrue(audit.first?.detail.contains("api.example.com") ?? false)
+    }
+
+    func testReportFieldsAreBoundedByScalarsNotGraphemes() async throws {
+        // One grapheme cluster: "a" followed by 100,000 combining acute accents.
+        let heavy = "a" + String(repeating: "\u{301}", count: 100_000)
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [])
+        let outcome = await runtime.execute(ToolCall(id: "h", tool: ToolRuntime.reportToolName, arguments: ["needed": heavy]))
+        guard case let .gapReported(report) = outcome else { return XCTFail("got \(outcome)") }
+        XCTAssertEqual(report.needed.unicodeScalars.count, ToolRuntime.maxReportFieldLength)
+        XCTAssertLessThanOrEqual(report.needed.utf8.count, ToolRuntime.maxReportFieldLength * 4)
+    }
+
+    func testAuthorizeDuringRunSeesAManifestNarrowedWhileTheToolRuns() async throws {
+        let (enteredStream, entered) = AsyncStream<Void>.makeStream()
+        let (release, releaser) = AsyncStream<Void>.makeStream()
+        let tool = DeclarativeTool(
+            name: "slow_writer", summary: "", resources: { _ in [] },
+            body: { _, context in
+                entered.yield()
+                for await _ in release { break }
+                try await context.authorize(.file(path: "/W/out.json", access: .write))
+                return "wrote"
+            }
+        )
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [tool])
+        let call = Task { await runtime.execute(ToolCall(id: "w", tool: "slow_writer")) }
+        for await _ in enteredStream { break } // the body is running
+        await runtime.replaceManifest(CapabilityManifest(fileGrants: [try FileGrant("/W", .readOnly)]))
+        releaser.yield()
+        let outcome = await call.value
+        XCTAssertEqual(outcome, .denied(.writeNotGranted("/W/out.json")), "judged against the manifest as it is now")
     }
 
     func testAuditedDenialReasonsAreClamped() async throws {

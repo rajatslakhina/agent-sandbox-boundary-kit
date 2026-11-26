@@ -22,10 +22,22 @@ extension Resource {
     /// The URL with any user name and password removed, so credentials typed into
     /// a URL never reach the audit trail or a screen.
     static func redactingUserInfo(_ url: String) -> String {
-        guard var parts = URLComponents(string: url), parts.user != nil || parts.password != nil else { return url }
-        parts.user = nil
-        parts.password = nil
-        return (parts.string ?? "(unparseable URL)") + " [user info removed]"
+        if var parts = URLComponents(string: url) {
+            guard parts.user != nil || parts.password != nil else { return url }
+            parts.user = nil
+            parts.password = nil
+            return (parts.string ?? "(URL not shown)") + " [user info removed]"
+        }
+        // Unparseable: cut anything up to the last "@" in the authority by hand, so a
+        // malformed URL cannot smuggle its credentials into the log either.
+        guard url.contains("@") else { return url }
+        guard let schemeEnd = url.range(of: "://") else { return "(unparseable URL containing '@', not shown)" }
+        let afterScheme = url[schemeEnd.upperBound...]
+        let authorityEnd = afterScheme.firstIndex(where: { "/?#".contains($0) }) ?? afterScheme.endIndex
+        let authority = afterScheme[..<authorityEnd]
+        guard let at = authority.lastIndex(of: "@") else { return url }
+        return String(url[..<schemeEnd.upperBound]) + String(authority[authority.index(after: at)...])
+            + String(afterScheme[authorityEnd...]) + " [user info removed]"
     }
 }
 

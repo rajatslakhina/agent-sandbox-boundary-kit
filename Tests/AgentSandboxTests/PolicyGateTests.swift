@@ -56,8 +56,9 @@ final class NetworkRuleTests: XCTestCase {
         XCTAssertEqual(try verdict("https://[fc::1]/x"), .deny(.ipLiteralNotAllowed("fc::1")))
         XCTAssertEqual(try verdict("https://2130706433/x"), .deny(.ipLiteralNotAllowed("2130706433")))
         XCTAssertEqual(try verdict("https://8.8.8.8/x"), .deny(.ipLiteralNotAllowed("8.8.8.8")))
-        // Other spellings of local addresses are not classed, but are still denied as IP literals.
+        // An expanded spelling of ::1 has the same bytes, so it is classed as loopback.
         XCTAssertEqual(try verdict("https://[0:0:0:0:0:0:0:1]/x"), .deny(.localNetwork(host: "0:0:0:0:0:0:0:1", kind: "loopback")))
+        // Spellings that differ in bytes (IPv4-mapped, integer, hex) are not classed, but are still denied as IP literals.
         for url in ["https://[::ffff:127.0.0.1]/x", "https://[::ffff:c0a8:114]/x", "https://0x7f.1/x"] {
             guard case .deny(.ipLiteralNotAllowed) = try verdict(url) else { return XCTFail("\(url) must be denied as an IP literal") }
         }
@@ -177,6 +178,21 @@ final class FileRuleTests: XCTestCase {
         let only = CapabilityManifest(fileGrants: [try FileGrant("/Docs/Reference", .readOnly)])
         XCTAssertEqual(gate.evaluate(.file(path: "/Docs/reference/x.md", access: .read), under: only, resolver: LexicalResolver()),
                        .deny(.outsideFileGrants("/Docs/reference/x.md")))
+    }
+
+    func testAnUnresolvableReadOnlyRootDeniesEverythingInsteadOfDroppingItsRestriction() throws {
+        // /W/Reference (read-only) reaches /W/real only through a chain longer than the
+        // hop limit; /W/d links straight to /W/real. Dropping the unresolvable grant
+        // would judge /W/real/x against /W (read-write) and allow the write.
+        let m = CapabilityManifest(fileGrants: [try FileGrant("/W", .readWrite), try FileGrant("/W/Reference", .readOnly)])
+        let resolver = SymlinkTableResolver(links: [
+            try SandboxPath("/W/Reference"): try SandboxPath("/W/c1"),
+            try SandboxPath("/W/c1"): try SandboxPath("/W/c2"),
+            try SandboxPath("/W/c2"): try SandboxPath("/W/real"),
+            try SandboxPath("/W/d"): try SandboxPath("/W/real"),
+        ], maxHops: 2)
+        XCTAssertEqual(gate.evaluate(.file(path: "/W/d/x", access: .write), under: m, resolver: resolver),
+                       .deny(.resolutionFailed("/W/Reference")))
     }
 
     func testGrantRootThatIsItselfALinkIsJudgedByItsPhysicalLocation() throws {

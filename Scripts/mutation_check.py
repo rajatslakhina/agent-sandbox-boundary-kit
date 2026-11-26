@@ -53,8 +53,8 @@ MUTANTS = [
     (
         "grant roots not resolved",
         SRC / "Policy/PolicyGate.swift",
-        "(try? resolver.resolve(grant.root)).map { (grant, $0) }",
-        "Optional(grant.root).map { (grant, $0) }",
+        "guard let root = try? resolver.resolve(grant.root) else {",
+        "guard let root = Optional(grant.root) else {",
         "FileRuleTests/testGrantRootThatIsItselfALinkIsJudgedByItsPhysicalLocation",
     ),
     (
@@ -245,6 +245,55 @@ MUTANTS = [
         'case let .network(url): return "fetch \\(Self.redactingUserInfo(url))"',
         'case let .network(url): return "fetch \\(url)"',
         'ToolRuntimeTests/testCredentialsInAURLNeverReachTheAuditTrail',
+    ),
+    (
+        'unresolvable grant root dropped (fails open)',
+        SRC / "Policy/PolicyGate.swift",
+        '            guard let root = try? resolver.resolve(grant.root) else {\n                return .deny(.resolutionFailed(grant.root.string))\n            }',
+        '            guard let root = try? resolver.resolve(grant.root) else { continue }',
+        'FileRuleTests/testAnUnresolvableReadOnlyRootDeniesEverythingInsteadOfDroppingItsRestriction',
+    ),
+    (
+        'malformed-URL reason keeps credentials',
+        SRC / "Policy/PolicyGate.swift",
+        'let shown = Resource.redactingUserInfo(raw).clamped(to: 120)',
+        'let shown = raw.clamped(to: 120)',
+        'ToolRuntimeTests/testCredentialsInAURLNeverReachTheAuditTrail',
+    ),
+    (
+        'unparseable URL not redacted',
+        SRC / "Policy/Resource.swift",
+        'guard url.contains("@") else { return url }',
+        'guard url.contains("@"), false else { return url }',
+        'ToolRuntimeTests/testCredentialsInAURLNeverReachTheAuditTrail',
+    ),
+    (
+        'clamp by graphemes',
+        SRC / "Support/Support.swift",
+        'return String(String.UnicodeScalarView(unicodeScalars.prefix(limit)))',
+        'return String(prefix(limit))',
+        'ToolRuntimeTests/testReportFieldsAreBoundedByScalarsNotGraphemes',
+    ),
+    (
+        'replaceManifest does not take effect',
+        SRC / "Runtime/ToolRuntime.swift",
+        '        manifest = newManifest\n',
+        '',
+        'ToolRuntimeTests/testAuthorizeDuringRunSeesAManifestNarrowedWhileTheToolRuns',
+    ),
+    (
+        'IPv6 ULA classified by spelling',
+        SRC / "Network/HostRule.swift",
+        'if bytes[0] & 0xFE == 0xFC { return .privateNetwork }',
+        'if host.hasPrefix("fc") || host.hasPrefix("fd") { return .privateNetwork }',
+        'NetworkRuleTests/testClassifiesLocalAddressesAndIPLiterals',
+    ),
+    (
+        'plain rule denials do not count',
+        SRC / "Policy/Resource.swift",
+        '        default: return true\n        }\n    }\n\n    public enum Category',
+        '        default: return false\n        }\n    }\n\n    public enum Category',
+        'ToolRuntimeTests/testSessionLocksAfterMaxDenialsAndThenRefusesEvenAllowedCalls',
     ),
 ]
 

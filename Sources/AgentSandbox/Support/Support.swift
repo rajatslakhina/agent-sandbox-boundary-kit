@@ -19,10 +19,12 @@ extension Int {
 }
 
 extension String {
-    /// The first `limit` characters (grapheme clusters). A non-positive limit yields "".
+    /// The first `limit` Unicode scalars. A non-positive limit yields "".
+    /// Scalars, not grapheme clusters: one cluster can be megabytes of combining
+    /// marks, so only a scalar (or byte) count actually bounds memory.
     func clamped(to limit: Int) -> String {
         guard limit > 0 else { return "" }
-        return String(prefix(limit))
+        return String(String.UnicodeScalarView(unicodeScalars.prefix(limit)))
     }
 }
 

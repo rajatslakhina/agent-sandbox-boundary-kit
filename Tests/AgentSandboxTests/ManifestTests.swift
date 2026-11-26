@@ -163,5 +163,6 @@ final class SupportTests: XCTestCase {
         XCTAssertEqual("abc".clamped(to: 0), "")
         XCTAssertEqual("abc".clamped(to: -5), "")
         XCTAssertEqual("abc".clamped(to: 2), "ab")
+        XCTAssertEqual(("e" + String(repeating: "\u{301}", count: 10)).clamped(to: 3).unicodeScalars.count, 3)
     }
 }

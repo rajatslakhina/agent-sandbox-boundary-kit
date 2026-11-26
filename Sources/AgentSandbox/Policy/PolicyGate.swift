@@ -74,10 +74,15 @@ public struct PolicyGate: AccessEvaluating {
         do { physical = try resolver.resolve(lexical) } catch {
             return .deny(.resolutionFailed(lexical.string))
         }
-        // The physical path is judged the same way against the physical roots. A
-        // root that cannot be resolved grants nothing (fail closed).
-        let physicalRoots = manifest.fileGrants.compactMap { grant in
-            (try? resolver.resolve(grant.root)).map { (grant, $0) }
+        // The physical path is judged the same way against the physical roots. If
+        // any root cannot be resolved, every file access is denied: dropping just
+        // that grant would also drop a read-only restriction it imposes (fail closed).
+        var physicalRoots: [(FileGrant, SandboxPath)] = []
+        for grant in manifest.fileGrants {
+            guard let root = try? resolver.resolve(grant.root) else {
+                return .deny(.resolutionFailed(grant.root.string))
+            }
+            physicalRoots.append((grant, root))
         }
         guard let physicalMode = Self.decidingMode(for: physical, among: physicalRoots),
               access == .read || physicalMode == .readWrite
@@ -130,7 +135,7 @@ public struct PolicyGate: AccessEvaluating {
     }
 
     private func evaluateNetwork(_ raw: String, _ manifest: CapabilityManifest) -> RuleOutcome {
-        let shown = raw.clamped(to: 120)
+        let shown = Resource.redactingUserInfo(raw).clamped(to: 120)
         guard let parts = URLComponents(string: raw) else { return .deny(.malformedURL(shown)) }
         let scheme = parts.scheme?.lowercased() ?? ""
         guard scheme == "https" else { return .deny(.schemeNotAllowed(scheme.clamped(to: 20))) }
