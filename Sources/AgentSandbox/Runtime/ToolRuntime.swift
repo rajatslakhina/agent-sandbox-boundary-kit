@@ -63,7 +63,7 @@ public enum CallOutcome: Sendable, Equatable {
         switch self {
         case let .executed(output): return output
         case let .denied(reason): return reason.agentFacingMessage
-        case let .gapReported(report): return "Recorded boundary gap (audit entry \(report.sequence)). A person will review it. Continue with what you can do inside the sandbox."
+        case let .gapReported(report): return "Recorded boundary gap report \(report.sequence). A person will review it. Continue with what you can do inside the sandbox."
         case let .rejected(why): return "Rejected: \(why)."
         case .failed: return "The tool failed."
         }
