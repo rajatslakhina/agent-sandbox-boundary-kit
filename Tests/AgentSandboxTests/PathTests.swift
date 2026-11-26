@@ -30,6 +30,14 @@ final class SandboxPathTests: XCTestCase {
         XCTAssertThrowsError(try SandboxPath(deep)) { XCTAssertEqual($0 as? PathError, .tooManyComponents) }
     }
 
+    func testCombiningMarkAfterSlashStillSplitsLikeTheKernel() throws {
+        // "/" + U+0301 is ONE grapheme cluster; the kernel still splits on the 0x2F byte.
+        XCTAssertThrowsError(try SandboxPath("/W/../\u{301}x")) { error in
+            XCTAssertEqual(error as? PathError, .parentReference("/W/../\u{301}x"))
+        }
+        XCTAssertEqual(try SandboxPath("/W/a/\u{301}b").components, ["W", "a", "\u{301}b"])
+    }
+
     func testContainmentIsByComponentNotStringPrefix() throws {
         let root = try SandboxPath("/App/Workspace")
         XCTAssertTrue(try SandboxPath("/App/Workspace").isWithin(root))
@@ -90,6 +98,17 @@ final class ResolverTests: XCTestCase {
         let viaParent = try resolver.resolve(SandboxPath(workspace.path + "/a"))
         XCTAssertEqual(viaParent, SandboxPath(normalisedComponents: physicalOutside.components + ["x"]))
         XCTAssertFalse(viaParent.isWithin(physicalWorkspace))
+
+        // "/" followed by a combining mark must still be a component boundary, or the
+        // resolver would never see `abs` as a link while the kernel follows it.
+        let marked = try resolver.resolve(SandboxPath(workspace.path + "/abs/\u{301}x"))
+        XCTAssertTrue(marked.isWithin(physicalOutside), "\(marked)")
+        XCTAssertFalse(marked.isWithin(physicalWorkspace))
+        // The same inside a link TARGET: `m` -> "abs/\u{301}y" must follow `abs`.
+        try fm.createSymbolicLink(atPath: workspace.appendingPathComponent("m").path, withDestinationPath: "abs/\u{301}y")
+        let viaTarget = try resolver.resolve(SandboxPath(workspace.path + "/m"))
+        XCTAssertTrue(viaTarget.isWithin(physicalOutside), "\(viaTarget)")
+        XCTAssertFalse(viaTarget.isWithin(physicalWorkspace))
 
         // A file that does not exist yet keeps its literal tail.
         let fresh = try resolver.resolve(SandboxPath(workspace.path + "/new/file.txt"))

@@ -121,6 +121,10 @@ final class FileRuleTests: XCTestCase {
     func testParentReferencesAreDeniedOutright() throws {
         let outcome = gate.evaluate(.file(path: "/App/Docs/../Secrets/key", access: .read), under: try manifest(), resolver: LexicalResolver())
         XCTAssertEqual(outcome, .deny(.invalidPath("contains a '..' component: /App/Docs/../Secrets/key")))
+        // A combining mark after the slash must not hide the `..` from the gate.
+        guard case .deny(.invalidPath) = gate.evaluate(.file(path: "/App/Docs/Drafts/../\u{301}x", access: .write), under: try manifest(), resolver: LexicalResolver()) else {
+            return XCTFail("`/..` followed by a combining mark must be denied")
+        }
         // The bypass this closes: `link/..` would collapse to a path inside the grant
         // as text, while the kernel walks `..` from wherever the link points.
         let resolver = SymlinkTableResolver(links: [try SandboxPath("/App/Docs/link"): try SandboxPath("/App/Secrets/inner")])

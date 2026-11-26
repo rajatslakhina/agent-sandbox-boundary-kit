@@ -306,14 +306,23 @@ final class ToolRuntimeTests: XCTestCase {
         let fetch = DeclarativeTool(name: "http_get", summary: "",
                                     resources: { [.network(url: try DeclarativeTool.require("url", in: $0))] },
                                     body: { _, _ in "" })
-        let runtime = try ToolRuntime(manifest: try manifest(), tools: [fetch])
+        // Lockout off: every URL below must actually be judged, not refused by the lock.
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [fetch], lockout: .disabled)
         _ = await runtime.execute(ToolCall(id: "c", tool: "http_get", arguments: ["url": "https://alice:hunter2@api.example.com/v1"]))
         // Unparseable (non-numeric port) with credentials: denied as malformed, and still redacted.
         let outcome = await runtime.execute(ToolCall(id: "d", tool: "http_get", arguments: ["url": "https://alice:hunter2@api.example.com:abc/"]))
         guard case .denied(.malformedURL) = outcome else { return XCTFail("got \(outcome)") }
         XCTAssertFalse(String(describing: outcome).contains("hunter2"))
+        // Credentials containing "/", "?" or "#", and a URL with no authority at all.
+        for url in ["https://alice:pa/ss@api.example.com/", "https://alice:p#ss@api.example.com/", "https:alice:hunter2@api.example.com"] {
+            let more = await runtime.execute(ToolCall(id: "x", tool: "http_get", arguments: ["url": url]))
+            guard case .denied(.malformedURL) = more else { return XCTFail("\(url) must be judged malformed, got \(more)") }
+            XCTAssertFalse(String(describing: more).contains("pa/ss") || String(describing: more).contains("p#ss")
+                           || String(describing: more).contains("hunter2"), "\(url) -> \(more)")
+        }
         let audit = await runtime.snapshot().audit
-        XCTAssertEqual(audit.count, 2)
+        XCTAssertEqual(audit.count, 5)
+        XCTAssertFalse(audit.contains { $0.detail.contains("pa/ss") || $0.detail.contains("p#ss") })
         XCTAssertFalse(audit.contains { $0.detail.contains("hunter2") || $0.detail.contains("alice") })
         XCTAssertFalse(audit.contains { String(describing: $0.verdict).contains("hunter2") })
         XCTAssertTrue(audit.first?.detail.contains("api.example.com") ?? false)
@@ -341,13 +350,17 @@ final class ToolRuntimeTests: XCTestCase {
                 return "wrote"
             }
         )
-        let runtime = try ToolRuntime(manifest: try manifest(), tools: [tool])
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [tool], lockout: LockoutPolicy(maxDenials: 1))
         let call = Task { await runtime.execute(ToolCall(id: "w", tool: "slow_writer")) }
         for await _ in enteredStream { break } // the body is running
         await runtime.replaceManifest(CapabilityManifest(fileGrants: [try FileGrant("/W", .readOnly)]))
         releaser.yield()
         let outcome = await call.value
-        XCTAssertEqual(outcome, .denied(.writeNotGranted("/W/out.json")), "judged against the manifest as it is now")
+        // Judged against the manifest as it is now (denied), and attributed to the host
+        // (the start-of-run manifest allowed it), so it does not count toward lockout.
+        XCTAssertEqual(outcome, .denied(.manifestChanged))
+        let locked = await runtime.isLocked
+        XCTAssertFalse(locked, "a revocation by the host is not the agent's denial")
     }
 
     func testAuditedDenialReasonsAreClamped() async throws {
@@ -507,7 +520,7 @@ final class ToolRuntimeTests: XCTestCase {
         XCTAssertTrue(allowed.allSatisfy { $0.sequence < lockingSequence })
     }
 
-    func testDuringRunAuthorizationUsesTheCurrentManifestAndCounts() async throws {
+    func testDuringRunAuthorizationIsJudgedAndCounted() async throws {
         let fetcher = DeclarativeTool(
             name: "fetch_then_save", summary: "Fetch, then save.",
             resources: { _ in [.network(url: "https://api.example.com/v1")] },

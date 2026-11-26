@@ -22,22 +22,20 @@ extension Resource {
     /// The URL with any user name and password removed, so credentials typed into
     /// a URL never reach the audit trail or a screen.
     static func redactingUserInfo(_ url: String) -> String {
-        if var parts = URLComponents(string: url) {
-            guard parts.user != nil || parts.password != nil else { return url }
+        let hidden = "(URL containing '@' without a parseable host, not shown)"
+        guard var parts = URLComponents(string: url) else {
+            // Unparseable: never try to find the credentials by hand (a password can
+            // contain "/", "?" or "#"); if there is an "@" anywhere, show nothing.
+            return url.contains("@") ? hidden : url
+        }
+        if parts.user != nil || parts.password != nil {
             parts.user = nil
             parts.password = nil
-            return (parts.string ?? "(URL not shown)") + " [user info removed]"
+            return (parts.string ?? hidden) + " [user info removed]"
         }
-        // Unparseable: cut anything up to the last "@" in the authority by hand, so a
-        // malformed URL cannot smuggle its credentials into the log either.
-        guard url.contains("@") else { return url }
-        guard let schemeEnd = url.range(of: "://") else { return "(unparseable URL containing '@', not shown)" }
-        let afterScheme = url[schemeEnd.upperBound...]
-        let authorityEnd = afterScheme.firstIndex(where: { "/?#".contains($0) }) ?? afterScheme.endIndex
-        let authority = afterScheme[..<authorityEnd]
-        guard let at = authority.lastIndex(of: "@") else { return url }
-        return String(url[..<schemeEnd.upperBound]) + String(authority[authority.index(after: at)...])
-            + String(afterScheme[authorityEnd...]) + " [user info removed]"
+        // Parsed, but with no host ("https:alice:pw@host" is a path): same rule.
+        if parts.percentEncodedHost == nil, url.contains("@") { return hidden }
+        return url
     }
 }
 

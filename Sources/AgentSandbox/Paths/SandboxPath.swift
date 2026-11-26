@@ -44,17 +44,17 @@ public struct SandboxPath: Hashable, Sendable, CustomStringConvertible {
         guard !raw.utf8.contains(0) else { throw PathError.containsNUL }
         guard raw.hasPrefix("/") else { throw PathError.notAbsolute(raw.clamped(to: 80)) }
 
+        // Split on the 0x2F byte, exactly as the kernel does. `String.split` works on
+        // grapheme clusters, and "/" followed by a combining mark is one cluster that
+        // is not "/", so a Character split would glue "/W/../\u{301}x" into a single
+        // harmless-looking component while the kernel walks "..". 0x2F never occurs
+        // inside a multi-byte UTF-8 sequence, so every byte slice decodes cleanly.
         var parts: [String] = []
-        for part in raw.split(separator: "/", omittingEmptySubsequences: true) {
-            switch part {
-            case ".":
-                continue
-            case "..":
-                throw PathError.parentReference(raw.clamped(to: 80))
-            default:
-                parts.append(String(part))
-                guard parts.count <= Self.maxComponents else { throw PathError.tooManyComponents }
-            }
+        for bytes in raw.utf8.split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: true) {
+            if bytes.elementsEqual(".".utf8) { continue }
+            if bytes.elementsEqual("..".utf8) { throw PathError.parentReference(raw.clamped(to: 80)) }
+            parts.append(String(decoding: bytes, as: UTF8.self))
+            guard parts.count <= Self.maxComponents else { throw PathError.tooManyComponents }
         }
         components = parts
     }

@@ -91,15 +91,11 @@ public struct FileSystemResolver: PathResolving {
             steps = steps.saturatingAdd(1)
             guard steps <= maxSteps else { throw ResolutionError.tooManyLinks(path.string) }
 
-            switch component {
-            case "", ".":
-                continue
-            case "..":
+            if component.utf8.isEmpty || component.utf8.elementsEqual(".".utf8) { continue }
+            if component.utf8.elementsEqual("..".utf8) {
                 guard !resolved.isEmpty else { throw ResolutionError.invalidLinkTarget(path.string) }
                 resolved.removeLast()
                 continue
-            default:
-                break
             }
 
             let candidate = "/" + (resolved + [component]).joined(separator: "/")
@@ -118,7 +114,9 @@ public struct FileSystemResolver: PathResolving {
                 throw ResolutionError.invalidLinkTarget(candidate)
             }
 
-            let target = destination.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+            // Byte split, like SandboxPath: a Character split mis-handles "/" + combining mark.
+            let target = destination.utf8.split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: true)
+                .map { String(decoding: $0, as: UTF8.self) }
             guard target.count + pending.count <= SandboxPath.maxComponents * 2 else {
                 throw ResolutionError.invalidLinkTarget(candidate)
             }

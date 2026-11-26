@@ -37,6 +37,7 @@ An iOS app's agent has its own version of every Siren honeypot: a session token 
 **Containment by path component, on the lexical *and* the resolved path.**
 
 - **No `..` at all.** Collapsing `..` as text is only correct when nothing on the way is a symlink: the kernel applies `..` *after* following a link, so `Workspace/cache-link/../Preferences` looks like a path inside the workspace but opens one beside wherever `cache-link` points. An agent never needs `..` to name a file inside its grants, so `SandboxPath` rejects every `..` component.
+- **Split on the `/` byte, like the kernel.** Swift's `String.split` works on grapheme clusters, and `/` followed by a combining mark is one cluster that is not `/`, so a Character split would hide `/../\u{301}x` inside one harmless-looking component. Paths and link targets are split on the 0x2F byte instead.
 - **Links walked like the kernel walks them.** `FileSystemResolver` (the default) resolves each component in turn and applies a `..` inside a link target to the already-resolved physical prefix.
 - **The deepest grant decides the mode,** so a read-only folder nested in a read-write one stays read-only. The rule runs again on the resolved path against the resolved grant roots, so a link cannot lead outside the grants, or into a read-only grant for a write. If any grant root cannot be resolved, every file access is denied, because dropping that one grant would also drop a read-only restriction it imposes.
 - **Case.** Containment is exact, but on a case-insensitive volume (default macOS APFS, and so the Simulator) `/W/reference` *is* `/W/Reference`; a read-only grant that matches ignoring case also forces read-only. That rule can only narrow.
@@ -46,7 +47,7 @@ An iOS app's agent has its own version of every Siren honeypot: a session token 
 **Host rules match on a label boundary, HTTPS only, port included.**
 
 - `includingSubdomains(of: "cdn.example.com")` covers `img.cdn.example.com` but not `evilcdn.example.com`. A subdomain rule on a single-label name (`com`) is refused at construction.
-- User info in a URL is denied (`https://api.example.com@192.168.1.20/`), and stripped from URLs in audit details even when the URL doesn't parse.
+- User info in a URL is denied (`https://api.example.com@192.168.1.20/`) and stripped from URLs in audit details. A URL containing `@` that has no parseable host is not shown at all, because its credentials can't be located reliably (a password may contain `/`, `?` or `#`).
 - Non-ASCII hosts are rejected: `URLComponents` hands them over percent-encoded and the host syntax check refuses `%` (use punycode).
 - A host whose last label is numeric or hex-prefixed is an IP literal, which catches `2130706433` and similar spellings.
 - Local addresses get a specific reason: `localhost` and `.local` names, dotted-quad IPv4 loopback, RFC 1918 and link-local ranges, and IPv6 `::1`, `fe80::/10` and `fc00::/7` (classified by address bytes, not spelling). They are denied unless a host rule covers them: an exact rule, or a subdomain rule on a multi-label local name such as `corp.local`. Every other IP spelling (IPv4-mapped IPv6, integer or hex IPv4) is denied as a plain IP literal.
@@ -61,15 +62,25 @@ An iOS app's agent has its own version of every Siren honeypot: a session token 
 - **Session lock.** A call parked while other calls locked the session is denied.
 - **Rules re-run.** The rules depend on the file system, and a link can be repointed while a call is parked. A link that now leads outside the grants, or into a read-only one for a write, is denied by the rules.
 - **Flags compared in full.** The reviewed verdict is a list of `ReviewFlag`s (lexical path, resolved path, matched suffixes), and it must match exactly, so a link repointed to a different flagged file is denied with `.verdictChangedDuringReview`. The clamped, three-item text is only for people.
-- **Mid-run accesses** (`context.authorize(_:)`) are judged against the manifest *as it is now*, and only while that call's tool body is running: a context kept past its call is refused (`.callNotActive`).
+- **Mid-run accesses** (`context.authorize(_:)`) are judged against the manifest *as it is now*, and only while that call's tool body is running: a context kept past its call is refused (`.callNotActive`). An access that the start-of-run manifest allowed and a host narrowing since revoked is denied as `.manifestChanged`, the host's doing rather than the agent's.
 
 Six tests park a classifier across its suspension point and change the manifest, the lock or a link underneath it; another parks a running tool body and narrows the manifest before it authorizes.
 
 **Denials are not an oracle.** The audit trail keeps the full reason (including where a symlink resolved to), with any user name and password stripped from URLs so credentials never land in the log. The model only gets `agentFacingMessage`: a category, "do not retry with a different path, host, encoding or tool", and a pointer to the report tool. Argument errors are the one exception, because the model needs them to fix its call: a missing argument is named; any other error a tool's resource closure throws reaches the model as "invalid arguments for <tool>" and stays in the audit trail.
 
-**Lockout counts only what the agent caused.** Unknown tools, invalid paths and denied resources count, and so do a flagged resource when no classifier is configured, a flagged resource requested mid-run (review is offered only up front), and a classifier denial. A manifest swap, a failing classifier, a verdict that changed during review, a tool authorizing after its call ended, or the lock itself do not. *Rejected:* exponential backoff, because a model does not experience time; refusing further calls is the signal it can act on.
+**Lockout counts only what the agent caused.**
 
-**Everything is bounded.** The audit trail and the report list are separate fixed-capacity ring buffers with drop counters, so an agent filing reports (which are free and uncounted) cannot push its denials out of the audit trail; report fields, audit details and every string inside an audited denial reason are clamped, and a review reason lists at most three flagged resources; counters saturate instead of trapping; path length and component count are capped, and symlink hops are capped at 255 whatever a resolver is configured with. Strings are clamped by Unicode scalars, not grapheme clusters, because one cluster can carry megabytes of combining marks.
+- *Counted:* unknown tools, invalid paths and denied resources; a flagged resource when no classifier is configured; a flagged resource requested mid-run (review is offered only up front); a classifier denial.
+- *Not counted:* a manifest swap (during review or during a run), a failing classifier, a verdict that changed during review, a tool authorizing after its call ended, and the lock's own refusals.
+
+*Rejected:* exponential backoff, because a model does not experience time; refusing further calls is the signal it can act on.
+
+**Everything is bounded.**
+
+- The audit trail and the report list are separate fixed-capacity ring buffers with drop counters, so an agent filing reports (free and uncounted) cannot push its denials out of the audit trail.
+- Report fields, audit details and every string inside an audited denial reason are clamped, by Unicode scalars rather than grapheme clusters (one cluster can carry megabytes of combining marks). A review reason lists at most three flagged resources.
+- Counters saturate instead of trapping.
+- Path length and component count are capped, and symlink hops are capped at 255 whatever a resolver is configured with.
 
 ## What the evals show
 
@@ -123,7 +134,7 @@ let toolResult = outcome.agentFacingText              // send this back as the t
 Add the package:
 
 ```swift
-.package(url: "https://github.com/rajatslakhina/agent-sandbox-boundary-kit.git", from: "4.1.1")
+.package(url: "https://github.com/rajatslakhina/agent-sandbox-boundary-kit.git", from: "4.1.2")
 ```
 
 ## Honest limits
@@ -150,8 +161,13 @@ Add the package:
 Run locally on Xcode 27.2 / Swift 6.4.2 (macOS), from a clean `.build`:
 
 - `swift build -Xswiftc -warnings-as-errors`: builds with no warnings.
-- `swift test`: 83 XCTest tests, 0 failures. They include real-file-system symlink tests (absolute, relative, a relative target that walks `..` through another link, and a loop) six tests that park a classifier across its suspension point and change the manifest, the lock, or a symlink underneath it (to outside; to a different flagged file; the fourth of four flagged links; a target differing only after 200 characters), and one that narrows the manifest while a tool body is running.
-- `python3 Scripts/mutation_check.py`: breaks 40 load-bearing guards one at a time (among them string-prefix containment, `..` collapsed as text, link targets collapsed as text, unchecked symlink target, shallowest grant deciding the mode, case variants of read-only grants, suffix host match, no re-check after review, a smuggled context still authorizing, reports written into the audit ring, a re-check that compares only the text summary, a default resolver that ignores links, IPv6 link-local or ULA classified by spelling, Keychain names compared by canonical equivalence, URL credentials written to the audit trail (parseable or not), an unresolvable grant root dropped instead of failing closed, grapheme clamping, a manifest replacement that doesn't take effect, unsorted digest and prompt, each host-caused denial counting toward lockout, and plain rule denials, unreviewable flagged access or a classifier denial not counting) and requires the named test to fail; a mutant that does not compile is reported as a setup error, not a kill.
+- `swift test`: 84 XCTest tests, 0 failures. They include real-file-system symlink tests (absolute, relative, a relative target that walks `..` through another link, a combining mark after `/`, and a loop); six tests that park a classifier across its suspension point and change the manifest, the lock or a symlink underneath it (to outside; to a different flagged file; the fourth of four flagged links; a target differing only after 200 characters); and one that narrows the manifest while a tool body is running.
+- `python3 Scripts/mutation_check.py`: breaks 44 load-bearing guards one at a time and requires the named test to fail; a mutant that does not compile, or whose filter matches no test, is reported as a setup error, not a kill. The mutants cover:
+  - *Paths:* string-prefix containment; `..` collapsed as text; paths or link targets split on grapheme clusters; link targets collapsed as text; unchecked symlink target; shallowest grant deciding the mode; case variants of read-only grants; grant roots not resolved, or an unresolvable root dropped; review suffix ignored or checked on the lexical name only; hop limit configurable away.
+  - *Network:* suffix host match; user info accepted; IPv6 link-local or ULA classified by spelling.
+  - *Runtime re-checks:* no epoch, lock or rules re-check after review; a re-check that compares only the text summary; resolved path left out of the review flag; flagged access allowed mid-run; a smuggled context still authorizing; a manifest replacement that doesn't take effect; a default resolver that ignores links.
+  - *Lockout accounting:* each host-caused denial counting (including a mid-run revocation); plain rule denials, unreviewable flagged access or a classifier denial not counting.
+  - *Logging and identity:* reports written into the audit ring; URL credentials in the audit trail (parseable, unparseable, host-less); grapheme clamping; Keychain names compared by canonical equivalence; unsorted digest and prompt.
 
 [CI](https://github.com/rajatslakhina/agent-sandbox-boundary-kit/actions/workflows/ci.yml) runs the same three things on GitHub's `macos-15` runner, plus an `xcodebuild` build of the library for the iOS Simulator SDK.
 

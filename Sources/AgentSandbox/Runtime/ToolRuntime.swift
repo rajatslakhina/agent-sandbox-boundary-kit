@@ -138,7 +138,8 @@ public actor ToolRuntime {
     private var denials = 0
     /// Calls whose tool body is running. `ToolContext.authorize(_:)` is refused for
     /// any other token, so a context smuggled out of its call is inert.
-    private var activeRuns: Set<UInt64> = []
+    /// Token → (epoch, manifest) at the moment the tool body started.
+    private var activeRuns: [UInt64: (epoch: UInt64, manifest: CapabilityManifest)] = [:]
     private var nextRunToken: UInt64 = 0
     private var sequence: UInt64 = 0
     private var audit: BoundedLog<AuditEntry>
@@ -268,8 +269,8 @@ public actor ToolRuntime {
         record(call, .beforeRun, detail: detail, .allowed)
         nextRunToken &+= 1 // UInt64: wrapping is unreachable in practice
         let token = nextRunToken
-        activeRuns.insert(token)
-        defer { activeRuns.remove(token) }
+        activeRuns[token] = (epoch, manifest)
+        defer { activeRuns[token] = nil }
         let context = ToolContext(callID: call.id, toolName: call.tool, runToken: token, runtime: self)
         do {
             let output = try await tool.run(call.arguments, context: context)
@@ -286,7 +287,7 @@ public actor ToolRuntime {
 
     func authorizeDuringRun(_ resource: Resource, callID: String, toolName: String, runToken: UInt64) throws {
         let call = ToolCall(id: callID, tool: toolName)
-        guard activeRuns.contains(runToken) else {
+        guard let run = activeRuns[runToken] else {
             _ = deny(call, .callNotActive, phase: .duringRun, detail: resource.description)
             throw SandboxDenial(reason: .callNotActive)
         }
@@ -299,6 +300,13 @@ public actor ToolRuntime {
         case .allow:
             record(call, .duringRun, detail: resource.description, .allowed)
         case let .deny(reason):
+            // Denied only because the host narrowed the manifest after this tool
+            // started? Then it is the host's doing, not the agent's: don't count it.
+            if run.epoch != epoch,
+               evaluator.evaluate(resource, under: run.manifest, resolver: resolver) == .allow {
+                _ = deny(call, .manifestChanged, phase: .duringRun, detail: resource.description)
+                throw SandboxDenial(reason: .manifestChanged)
+            }
             _ = deny(call, reason, phase: .duringRun, detail: resource.description)
             throw SandboxDenial(reason: reason)
         case let .needsReview(flags):

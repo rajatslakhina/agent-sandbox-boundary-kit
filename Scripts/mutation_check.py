@@ -116,8 +116,8 @@ MUTANTS = [
     (
         "smuggled context still authorizes",
         SRC / "Runtime/ToolRuntime.swift",
-        "guard activeRuns.contains(runToken) else {",
-        "guard activeRuns.contains(runToken) || true else {",
+        "guard let run = activeRuns[runToken] else {",
+        "guard let run = activeRuns[runToken] ?? Optional((epoch: epoch, manifest: manifest)) else {",
         "ToolRuntimeTests/testContextSmuggledOutOfItsCallIsInert",
     ),
     (
@@ -263,8 +263,8 @@ MUTANTS = [
     (
         'unparseable URL not redacted',
         SRC / "Policy/Resource.swift",
-        'guard url.contains("@") else { return url }',
-        'guard url.contains("@"), false else { return url }',
+        'return url.contains("@") ? hidden : url',
+        'return url',
         'ToolRuntimeTests/testCredentialsInAURLNeverReachTheAuditTrail',
     ),
     (
@@ -294,6 +294,34 @@ MUTANTS = [
         '        default: return true\n        }\n    }\n\n    public enum Category',
         '        default: return false\n        }\n    }\n\n    public enum Category',
         'ToolRuntimeTests/testSessionLocksAfterMaxDenialsAndThenRefusesEvenAllowedCalls',
+    ),
+    (
+        'path split on grapheme clusters',
+        SRC / "Paths/SandboxPath.swift",
+        'for bytes in raw.utf8.split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: true) {',
+        'for bytes in raw.split(separator: "/", omittingEmptySubsequences: true).map({ $0.utf8 }) {',
+        'SandboxPathTests/testCombiningMarkAfterSlashStillSplitsLikeTheKernel',
+    ),
+    (
+        'link targets split on grapheme clusters',
+        SRC / "Paths/PathResolving.swift",
+        'let target = destination.utf8.split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: true)\n                .map { String(decoding: $0, as: UTF8.self) }',
+        'let target = destination.split(separator: "/", omittingEmptySubsequences: true).map(String.init)',
+        'ResolverTests/testFileSystemResolverFollowsRealAbsoluteAndRelativeLinks',
+    ),
+    (
+        "host-less URL with '@' shown",
+        SRC / "Policy/Resource.swift",
+        'if parts.percentEncodedHost == nil, url.contains("@") { return hidden }',
+        '',
+        'ToolRuntimeTests/testCredentialsInAURLNeverReachTheAuditTrail',
+    ),
+    (
+        'mid-run host revocation counted against the agent',
+        SRC / "Runtime/ToolRuntime.swift",
+        'if run.epoch != epoch,',
+        'if false, run.epoch != epoch,',
+        'ToolRuntimeTests/testAuthorizeDuringRunSeesAManifestNarrowedWhileTheToolRuns',
     ),
 ]
 

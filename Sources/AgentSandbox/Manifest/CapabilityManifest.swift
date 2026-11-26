@@ -51,8 +51,11 @@ public struct CapabilityManifest: Hashable, Sendable {
         self.reviewSuffixes = reviewSuffixes
     }
 
-    /// Order-independent: built from sorted, tagged, length-prefixed fields, so two
-    /// manifests are equal exactly when their digests are (up to FNV collisions).
+    /// Order-independent: built from sorted, tagged, length-prefixed fields, so
+    /// manifests built from byte-identical values have equal digests regardless of
+    /// construction order. (Swift `==` on the sets uses canonical equivalence, so an
+    /// NFC and an NFD spelling compare equal but digest differently; the gate, like
+    /// the digest, treats Keychain and app-group names as bytes.)
     public var digest: String {
         var hasher = FNV1a64()
         hasher.combine("agent-sandbox-manifest/v1")
