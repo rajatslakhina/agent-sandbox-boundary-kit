@@ -102,14 +102,14 @@ MUTANTS = [
     (
         "rules not re-run after review",
         SRC / "Runtime/ToolRuntime.swift",
-        "switch evaluator.evaluate(resources, under: manifest, resolver: resolver) {\n            case .needsReview(why):",
-        "switch RuleOutcome.needsReview(why) {\n            case .needsReview(why):",
+        "switch evaluator.evaluate(resources, under: manifest, resolver: resolver) {\n            case .needsReview(flags):",
+        "switch RuleOutcome.needsReview(flags) {\n            case .needsReview(flags):",
         "ToolRuntimeTests/testSymlinkSwappedWhileParkedInReviewIsCaughtByTheRecheck",
     ),
     (
         "flagged access allowed mid-run",
         SRC / "Runtime/ToolRuntime.swift",
-        "case let .needsReview(why):\n            let reason = DenialReason.reviewUnavailable(why)\n            _ = deny(call, reason, phase: .duringRun, detail: resource.description)\n            throw SandboxDenial(reason: reason)",
+        "case let .needsReview(flags):\n            let reason = DenialReason.reviewUnavailable(ReviewFlag.summary(flags))\n            _ = deny(call, reason, phase: .duringRun, detail: resource.description)\n            throw SandboxDenial(reason: reason)",
         "case .needsReview:\n            record(call, .duringRun, detail: resource.description, .allowed)",
         "ToolRuntimeTests/testFlaggedAccessDuringRunIsDeniedAndCounted",
     ),
@@ -163,10 +163,10 @@ MUTANTS = [
         'FileRuleTests/testCaseVariantOfANestedReadOnlyGrantIsStillReadOnly',
     ),
     (
-        'resolved path left out of the review reason',
+        'resolved path left out of the review flag',
         SRC / "Policy/PolicyGate.swift",
-        'let target = physical == lexical ? "" :',
-        'let target = physical == physical ? "" :',
+        'ReviewFlag(access: access, lexical: lexical, physical: physical,',
+        'ReviewFlag(access: access, lexical: lexical, physical: lexical,',
         'ToolRuntimeTests/testLinkRepointedToAnotherFlaggedFileDuringReviewIsDenied',
     ),
     (
@@ -190,6 +190,27 @@ MUTANTS = [
         'let grants = Array(manifest.fileGrants)',
         'PromptRendererTests/testPromptListsGrantsAndHostsInSortedOrder',
     ),
+    (
+        "re-check compares only the bounded summary",
+        SRC / "Runtime/ToolRuntime.swift",
+        "case .needsReview(flags):",
+        "case let .needsReview(now) where ReviewFlag.summary(now) == ReviewFlag.summary(flags):",
+        "ToolRuntimeTests/testRepointingTheFourthOfFourFlaggedLinksDuringReviewIsDenied",
+    ),
+    (
+        "default resolver ignores links",
+        SRC / "Runtime/ToolRuntime.swift",
+        "resolver: any PathResolving = FileSystemResolver(),",
+        "resolver: any PathResolving = LexicalResolver(),",
+        "ToolRuntimeTests/testDefaultResolverFollowsRealLinks",
+    ),
+    (
+        "hop limit configurable away",
+        SRC / "Paths/PathResolving.swift",
+        "self.maxHops = min(max(1, maxHops), Self.hopLimit)",
+        "self.maxHops = max(1, maxHops)",
+        "ResolverTests/testHopLimitCannotBeConfiguredAway",
+    ),
 ]
 
 
@@ -211,6 +232,10 @@ def main() -> int:
         finally:
             path.write_text(original)
         output = result.stdout + result.stderr
+        # A filter that matches no test would let every mutant "survive" silently.
+        if re.search(r"Executed 0 tests", output):
+            print(f"SETUP ERROR [{name}]: filter {test} matched no tests")
+            return 2
         # A mutant only counts as caught if it compiled and a test actually failed;
         # a build error would otherwise masquerade as a kill.
         if not re.search(r"Executed \d+ tests?, with [1-9]\d* failures?", output):

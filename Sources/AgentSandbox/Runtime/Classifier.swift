@@ -3,7 +3,10 @@
 public struct ReviewRequest: Sendable, Equatable {
     public let call: ToolCall
     public let resources: [Resource]
-    public let flaggedBecause: String
+    /// Every flagged access, in full.
+    public let flags: [ReviewFlag]
+    /// `ReviewFlag.summary(flags)`: bounded text for a prompt or a log.
+    public var flaggedBecause: String { ReviewFlag.summary(flags) }
     public let manifestDigest: String
 }
 

@@ -26,8 +26,37 @@ public enum RuleOutcome: Equatable, Sendable {
     case allow
     case deny(DenialReason)
     /// The rules allow it but the manifest flags it for a second look
-    /// (for example a `.token` file inside a granted root).
-    case needsReview(String)
+    /// (for example a `.token` file inside a granted root). Carries the full,
+    /// unclamped identity of every flagged access, so the runtime can tell after
+    /// review whether it is still judging exactly what was reviewed.
+    case needsReview([ReviewFlag])
+}
+
+/// One flagged access: what was asked for, where it really resolves, and which
+/// review suffixes it matched.
+public struct ReviewFlag: Hashable, Sendable, CustomStringConvertible {
+    public let access: FileAccess
+    public let lexical: SandboxPath
+    public let physical: SandboxPath
+    public let suffixes: [String]
+
+    public init(access: FileAccess, lexical: SandboxPath, physical: SandboxPath, suffixes: [String]) {
+        self.access = access
+        self.lexical = lexical
+        self.physical = physical
+        self.suffixes = suffixes
+    }
+
+    public var description: String {
+        let target = physical == lexical ? "" : " (resolves to \(physical.string.clamped(to: 200)))"
+        return "\(access.rawValue) of \(lexical.string.clamped(to: 200))\(target) matches review suffix \(suffixes.joined(separator: ", "))"
+    }
+
+    /// A bounded, human-readable summary of many flags (at most three listed).
+    public static func summary(_ flags: [ReviewFlag]) -> String {
+        let shown = flags.prefix(3).map(\.description).joined(separator: "; ")
+        return flags.count > 3 ? "\(shown); and \(flags.count - 3) more" : shown
+    }
 }
 
 /// Why a call, or one access inside a call, was refused. The full reason goes to
@@ -50,7 +79,8 @@ public enum DenialReason: Hashable, Sendable, CustomStringConvertible {
     case keychainForbidden(String)
     case appGroupForbidden(String)
     /// Flagged for review, but no review path exists (no classifier, or the
-    /// access was requested mid-run, where review is not offered).
+    /// access was requested mid-run, where review is not offered). The string is
+    /// `ReviewFlag.summary` of the flags.
     case reviewUnavailable(String)
     case classifierDenied(String)
     case classifierUnavailable
@@ -92,9 +122,10 @@ public enum DenialReason: Hashable, Sendable, CustomStringConvertible {
     /// Whether this denial is the agent's doing and so counts toward lockout.
     /// Denials caused by the host app or its tools (a manifest swap, a failing
     /// classifier, a verdict that changed during review, a tool authorizing after
-    /// its call ended) or by the lock itself do not. A flagged resource with no
-    /// classifier configured (`reviewUnavailable`) does count: the agent asked
-    /// for something the host chose not to offer a review path for.
+    /// its call ended) or by the lock itself do not. Counted besides the plain
+    /// rule denials: a flagged resource with no classifier configured, a flagged
+    /// resource requested mid-run (both `reviewUnavailable`: review is offered
+    /// only up front, and only if the host configured it), and a classifier denial.
     public var countsTowardLockout: Bool {
         switch self {
         case .classifierUnavailable, .manifestChanged, .verdictChangedDuringReview, .callNotActive, .sessionLocked:

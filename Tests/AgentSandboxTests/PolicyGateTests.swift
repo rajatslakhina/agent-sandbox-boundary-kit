@@ -81,6 +81,8 @@ final class NetworkRuleTests: XCTestCase {
             XCTAssertEqual(error as? HostRuleError, .domainRuleTooBroad("com"))
         }
         XCTAssertNoThrow(try HostRule.exact("localhost")) // an exact single-label rule names one host
+        XCTAssertThrowsError(try HostRule.exact("api.example.com:8443")) // a port typed into the host is not an IPv6 literal
+        XCTAssertNoThrow(try HostRule.exact("[fd00::1]"))
     }
 }
 
@@ -151,6 +153,9 @@ final class FileRuleTests: XCTestCase {
         let resolver = SymlinkTableResolver(links: [try SandboxPath("/W/ref-link"): try SandboxPath("/W/Reference")])
         XCTAssertEqual(gate.evaluate(.file(path: "/W/ref-link/style.md", access: .write), under: m, resolver: resolver),
                        .deny(.symlinkEscape(lexical: "/W/ref-link/style.md", resolved: "/W/Reference/style.md")))
+        // And the converse, which the case rule above can't mask: read-write nested in read-only.
+        let rwInRo = CapabilityManifest(fileGrants: [try FileGrant("/D", .readOnly), try FileGrant("/D/Out", .readWrite)])
+        XCTAssertEqual(gate.evaluate(.file(path: "/D/Out/x", access: .write), under: rwInRo, resolver: LexicalResolver()), .allow)
         // The same root listed twice with different modes: the restrictive one wins.
         let dup = CapabilityManifest(fileGrants: [try FileGrant("/D", .readWrite), try FileGrant("/D", .readOnly)])
         XCTAssertEqual(gate.evaluate(.file(path: "/D/x", access: .write), under: dup, resolver: LexicalResolver()), .deny(.writeNotGranted("/D/x")))
@@ -182,11 +187,13 @@ final class FileRuleTests: XCTestCase {
 
     func testReviewReasonStaysBoundedForManyFlaggedResources() throws {
         let resources = (0..<1_000).map { Resource.file(path: "/App/Docs/\($0).token", access: .read) }
-        guard case let .needsReview(why) = gate.evaluate(resources, under: try manifest(), resolver: LexicalResolver()) else {
+        guard case let .needsReview(flags) = gate.evaluate(resources, under: try manifest(), resolver: LexicalResolver()) else {
             return XCTFail("expected needsReview")
         }
-        XCTAssertLessThan(why.count, 1_000)
-        XCTAssertTrue(why.hasSuffix("and 997 more"))
+        XCTAssertEqual(flags.count, 1_000, "the verdict keeps every flag in full")
+        let summary = ReviewFlag.summary(flags)
+        XCTAssertLessThan(summary.count, 1_000, "the text shown to people stays bounded")
+        XCTAssertTrue(summary.hasSuffix("and 997 more"))
     }
 
     func testReviewSuffixIsCaseInsensitiveAndFlagsInsteadOfAllowing() throws {

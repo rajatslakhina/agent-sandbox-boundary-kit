@@ -236,6 +236,72 @@ final class ToolRuntimeTests: XCTestCase {
         XCTAssertEqual(runs, 0)
     }
 
+    func testRepointingTheFourthOfFourFlaggedLinksDuringReviewIsDenied() async throws {
+        // The text summary lists only three flags; the re-check must compare all of them.
+        let (enteredStream, entered) = AsyncStream<Void>.makeStream()
+        let (release, releaser) = AsyncStream<Void>.makeStream()
+        var links: [SandboxPath: SandboxPath] = [:]
+        for i in 1...4 { links[try SandboxPath("/W/l\(i).token")] = try SandboxPath("/W/t\(i).token") }
+        let resolver = SwitchableResolver(links)
+        let counter = RunCounter()
+        let multi = DeclarativeTool(
+            name: "read_many", summary: "",
+            resources: { _ in (1...4).map { .file(path: "/W/l\($0).token", access: .read) } },
+            body: { _, _ in await counter.bump(); return "read" }
+        )
+        let runtime = try ToolRuntime(
+            manifest: try manifest(), tools: [multi], resolver: resolver,
+            classifier: ParkedClassifier(entered: entered, release: release, decision: .allow)
+        )
+        let call = Task { await runtime.execute(ToolCall(id: "m", tool: "read_many")) }
+        for await _ in enteredStream { break }
+        links[try SandboxPath("/W/l4.token")] = try SandboxPath("/W/vault.token")
+        resolver.swap(to: links)
+        releaser.yield()
+        let outcome = await call.value
+        XCTAssertEqual(outcome, .denied(.verdictChangedDuringReview))
+        let runs = await counter.runs
+        XCTAssertEqual(runs, 0)
+    }
+
+    func testRepointingBeyondTwoHundredCharactersDuringReviewIsDenied() async throws {
+        // Two targets that share their first 200+ characters and differ after.
+        let (enteredStream, entered) = AsyncStream<Void>.makeStream()
+        let (release, releaser) = AsyncStream<Void>.makeStream()
+        let deep = "/W/" + Array(repeating: "folder", count: 40).joined(separator: "/")
+        let link = try SandboxPath("/W/current.token")
+        let resolver = SwitchableResolver([link: try SandboxPath(deep + "/a.token")])
+        let counter = RunCounter()
+        let runtime = try ToolRuntime(
+            manifest: try manifest(), tools: [readTool(counter)], resolver: resolver,
+            classifier: ParkedClassifier(entered: entered, release: release, decision: .allow)
+        )
+        let parked = read("/W/current.token")
+        let call = Task { await runtime.execute(parked) }
+        for await _ in enteredStream { break }
+        resolver.swap(to: [link: try SandboxPath(deep + "/b.token")])
+        releaser.yield()
+        let outcome = await call.value
+        XCTAssertEqual(outcome, .denied(.verdictChangedDuringReview))
+        let runs = await counter.runs
+        XCTAssertEqual(runs, 0)
+    }
+
+    func testDefaultResolverFollowsRealLinks() async throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("agent-sandbox-default-\(UUID().uuidString)")
+        let workspace = base.appendingPathComponent("Workspace")
+        let outside = base.appendingPathComponent("Caches")
+        try fm.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        try fm.createSymbolicLink(atPath: workspace.appendingPathComponent("link").path, withDestinationPath: outside.path)
+        let m = CapabilityManifest(fileGrants: [try FileGrant(workspace.path, .readWrite)])
+        let runtime = try ToolRuntime(manifest: m, tools: [readTool(RunCounter())]) // no resolver: argument
+        let outcome = await runtime.execute(read(workspace.path + "/link/session.token"))
+        guard case .denied(.symlinkEscape) = outcome else { return XCTFail("the default resolver must follow links; got \(outcome)") }
+    }
+
     func testAuditedDenialReasonsAreClamped() async throws {
         let runtime = try ToolRuntime(manifest: try manifest(), tools: [readTool(RunCounter())], lockout: .disabled)
         let longPath = "/" + Array(repeating: "segment", count: 200).joined(separator: "/")

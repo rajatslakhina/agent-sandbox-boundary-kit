@@ -13,18 +13,15 @@ extension AccessEvaluating {
     /// sends the call to review; otherwise it is allowed. A call that declares no
     /// resources (pure computation) is allowed.
     func evaluate(_ resources: [Resource], under manifest: CapabilityManifest, resolver: any PathResolving) -> RuleOutcome {
-        var reviews: [String] = []
+        var reviews: [ReviewFlag] = []
         for resource in resources {
             switch evaluate(resource, under: manifest, resolver: resolver) {
             case .allow: continue
             case let .deny(reason): return .deny(reason)
-            case let .needsReview(why): reviews.append(why)
+            case let .needsReview(flags): reviews.append(contentsOf: flags)
             }
         }
-        guard !reviews.isEmpty else { return .allow }
-        // Bounded however many resources a call declares.
-        let shown = reviews.prefix(3).joined(separator: "; ")
-        return .needsReview(reviews.count > 3 ? "\(shown); and \(reviews.count - 3) more" : shown)
+        return reviews.isEmpty ? .allow : .needsReview(reviews)
     }
 }
 
@@ -85,10 +82,9 @@ public struct PolicyGate: AccessEvaluating {
             }
         }
         guard flagged.isEmpty else {
-            // The resolved path is part of the reason, so the post-review re-check
+            // The resolved path is part of the flag, so the post-review re-check
             // notices a link repointed to a different file while the call was parked.
-            let target = physical == lexical ? "" : " (resolves to \(physical.string.clamped(to: 200)))"
-            return .needsReview("\(access.rawValue) of \(lexical.string.clamped(to: 200))\(target) matches review suffix \(flagged.sorted().joined(separator: ", "))")
+            return .needsReview([ReviewFlag(access: access, lexical: lexical, physical: physical, suffixes: flagged.sorted())])
         }
         return .allow
     }

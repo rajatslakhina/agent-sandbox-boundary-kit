@@ -63,7 +63,7 @@ public enum CallOutcome: Sendable, Equatable {
         switch self {
         case let .executed(output): return output
         case let .denied(reason): return reason.agentFacingMessage
-        case let .gapReported(report): return "Recorded boundary gap report \(report.sequence). A person will review it. Continue with what you can do inside the sandbox."
+        case let .gapReported(report): return "Recorded boundary gap report \(report.sequence) for the app to review. Continue with what you can do inside the sandbox."
         case let .rejected(why): return "Rejected: \(why)."
         case .failed: return "The tool failed."
         }
@@ -235,9 +235,11 @@ public actor ToolRuntime {
         switch evaluator.evaluate(resources, under: judgedManifest, resolver: resolver) {
         case let .deny(reason):
             return deny(call, reason, phase: .beforeRun, detail: detail)
-        case let .needsReview(why):
-            guard let classifier else { return deny(call, .reviewUnavailable(why), phase: .beforeRun, detail: detail) }
-            let request = ReviewRequest(call: call, resources: resources, flaggedBecause: why, manifestDigest: manifestDigest)
+        case let .needsReview(flags):
+            guard let classifier else {
+                return deny(call, .reviewUnavailable(ReviewFlag.summary(flags)), phase: .beforeRun, detail: detail)
+            }
+            let request = ReviewRequest(call: call, resources: resources, flags: flags, manifestDigest: manifestDigest)
             let decision: ClassifierDecision
             do { decision = try await classifier.classify(request) } catch {
                 return deny(call, .classifierUnavailable, phase: .beforeRun, detail: detail)
@@ -252,8 +254,8 @@ public actor ToolRuntime {
             // changed while the call was parked. The classifier approved one verdict;
             // run anything else and it is unreviewed.
             switch evaluator.evaluate(resources, under: manifest, resolver: resolver) {
-            case .needsReview(why):
-                break
+            case .needsReview(flags):
+                break // exactly the flags that were reviewed, compared in full
             case let .deny(reason):
                 return deny(call, reason, phase: .beforeRun, detail: detail)
             case .allow, .needsReview:
@@ -299,8 +301,8 @@ public actor ToolRuntime {
         case let .deny(reason):
             _ = deny(call, reason, phase: .duringRun, detail: resource.description)
             throw SandboxDenial(reason: reason)
-        case let .needsReview(why):
-            let reason = DenialReason.reviewUnavailable(why)
+        case let .needsReview(flags):
+            let reason = DenialReason.reviewUnavailable(ReviewFlag.summary(flags))
             _ = deny(call, reason, phase: .duringRun, detail: resource.description)
             throw SandboxDenial(reason: reason)
         }

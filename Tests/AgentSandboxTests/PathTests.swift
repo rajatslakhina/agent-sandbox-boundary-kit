@@ -97,6 +97,17 @@ final class ResolverTests: XCTestCase {
         XCTAssertTrue(fresh.isWithin(physicalWorkspace))
     }
 
+    func testHopLimitCannotBeConfiguredAway() throws {
+        XCTAssertEqual(FileSystemResolver(maxHops: .max).maxHops, FileSystemResolver.hopLimit)
+        XCTAssertEqual(FileSystemResolver(maxHops: -3).maxHops, 1)
+        let loop = SymlinkTableResolver(links: [
+            try SandboxPath("/a"): try SandboxPath("/b"),
+            try SandboxPath("/b"): try SandboxPath("/a"),
+        ], maxHops: .max)
+        XCTAssertEqual(loop.maxHops, FileSystemResolver.hopLimit)
+        XCTAssertThrowsError(try loop.resolve(SandboxPath("/a/f"))) // terminates instead of spinning
+    }
+
     func testFileSystemResolverBoundsRealLinkLoops() throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("agent-sandbox-loop-\(UUID().uuidString)")

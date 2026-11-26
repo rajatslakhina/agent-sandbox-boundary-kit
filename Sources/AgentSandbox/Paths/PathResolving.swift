@@ -31,7 +31,7 @@ public struct SymlinkTableResolver: PathResolving {
 
     public init(links: [SandboxPath: SandboxPath], maxHops: Int = 40) {
         self.links = links
-        self.maxHops = max(1, maxHops)
+        self.maxHops = min(max(1, maxHops), FileSystemResolver.hopLimit)
     }
 
     public func resolve(_ path: SandboxPath) throws -> SandboxPath {
@@ -66,10 +66,15 @@ public struct SymlinkTableResolver: PathResolving {
 /// pops the already-resolved (physical) prefix, exactly as the kernel does after
 /// following the link. A `..` that would climb above `/` fails closed.
 public struct FileSystemResolver: PathResolving {
+    /// The most hops any resolver will follow, whatever it is configured with: a
+    /// cap near `Int.max` would make a link loop spin effectively forever.
+    public static let hopLimit = 255
+
     public let maxHops: Int
 
+    /// `maxHops` is clamped to `1...hopLimit`.
     public init(maxHops: Int = 40) {
-        self.maxHops = max(1, maxHops)
+        self.maxHops = min(max(1, maxHops), Self.hopLimit)
     }
 
     public func resolve(_ path: SandboxPath) throws -> SandboxPath {

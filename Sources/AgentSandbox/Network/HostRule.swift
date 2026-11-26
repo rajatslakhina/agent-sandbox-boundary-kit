@@ -87,7 +87,11 @@ enum HostClassifier {
         guard !host.isEmpty, host.utf8.count <= 253 else { return nil }
         let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789.-:")
         guard host.allSatisfy({ allowed.contains($0) }) else { return nil }
-        if host.contains(":") { return host } // IPv6 literal; dot rules below don't apply
+        if host.contains(":") {
+            // Only a real IPv6 literal may contain ':' ("api.example.com:8443" is a typo, not a host).
+            var address = in6_addr()
+            return inet_pton(AF_INET6, host, &address) == 1 ? host : nil
+        }
         let labels = host.split(separator: ".", omittingEmptySubsequences: false)
         guard labels.allSatisfy({ !$0.isEmpty && $0.count <= 63 }) else { return nil }
         return host
