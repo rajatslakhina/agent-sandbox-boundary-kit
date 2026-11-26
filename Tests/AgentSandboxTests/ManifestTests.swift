@@ -25,6 +25,37 @@ final class ManifestDigestTests: XCTestCase {
     /// Same independent computation, for `base()`.
     static let baseManifestDigest = "6c1aa73acacba2d2"
 
+    /// Six of everything, so an unsorted encoding would almost never iterate two
+    /// differently built sets in the same order. Literal from the independent
+    /// Python implementation.
+    static let wideManifestDigest = "eb9f0df88eb4ed92"
+
+    private func wide(reversed: Bool, capacity: Int) throws -> CapabilityManifest {
+        var m = CapabilityManifest()
+        m.fileGrants = Set(minimumCapacity: capacity)
+        m.hosts = Set(minimumCapacity: capacity)
+        m.keychainServices = Set(minimumCapacity: capacity)
+        m.appGroups = Set(minimumCapacity: capacity)
+        m.reviewSuffixes = Set(minimumCapacity: capacity)
+        var indices = Array(0..<6)
+        if reversed { indices.reverse() }
+        let letters = ["A", "B", "C", "D", "E", "F"]
+        for i in indices {
+            m.fileGrants.insert(try FileGrant("/" + letters[i], i % 2 == 0 ? .readWrite : .readOnly))
+            m.hosts.insert(try .exact("h\(i + 1).example.com"))
+            m.keychainServices.insert("k\(i + 1)")
+            m.appGroups.insert("g\(i + 1)")
+            m.reviewSuffixes.insert(".r\(i + 1)")
+        }
+        return m
+    }
+
+    func testDigestIsSortedSoEveryConstructionHistoryAgrees() throws {
+        for (reversed, capacity) in [(false, 0), (true, 0), (false, 64), (true, 257), (false, 1024)] {
+            XCTAssertEqual(try wide(reversed: reversed, capacity: capacity).digest, Self.wideManifestDigest)
+        }
+    }
+
     func testDigestIgnoresInsertionOrder() throws {
         var a = try base()
         var b = CapabilityManifest()
@@ -72,6 +103,21 @@ final class PromptRendererTests: XCTestCase {
         XCTAssertTrue(prompt.contains("\(ToolRuntime.reportToolName)(needed:, reason:)"))
         XCTAssertTrue(prompt.contains("After 3 denied calls this session locks"))
         XCTAssertTrue(prompt.contains("- read_file: Read a file."))
+    }
+
+    func testPromptListsGrantsAndHostsInSortedOrder() throws {
+        var m = CapabilityManifest(fileGrants: Set(minimumCapacity: 300), hosts: Set(minimumCapacity: 300))
+        for letter in ["F", "C", "A", "E", "B", "D"] {
+            m.fileGrants.insert(try FileGrant("/" + letter, .readOnly))
+            m.hosts.insert(try .exact(letter.lowercased() + ".example.com"))
+        }
+        let prompt = SandboxPromptRenderer.render(manifest: m, tools: [], lockout: .disabled)
+        let grantOffsets = ["A", "B", "C", "D", "E", "F"].compactMap { prompt.range(of: "   - /\($0) (read only)")?.lowerBound }
+        let hostOffsets = ["a", "b", "c", "d", "e", "f"].compactMap { prompt.range(of: "https://\($0).example.com:443")?.lowerBound }
+        XCTAssertEqual(grantOffsets.count, 6)
+        XCTAssertEqual(hostOffsets.count, 6)
+        XCTAssertEqual(grantOffsets, grantOffsets.sorted())
+        XCTAssertEqual(hostOffsets, hostOffsets.sorted())
     }
 
     func testPromptIsDeterministicAndTracksTheManifest() throws {

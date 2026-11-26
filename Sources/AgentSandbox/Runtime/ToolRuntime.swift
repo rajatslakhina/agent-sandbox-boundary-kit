@@ -76,7 +76,6 @@ public struct AuditEntry: Sendable, Equatable {
         case beforeRun
         /// An access requested from inside a running tool.
         case duringRun
-        case report
         /// The tool ran and then threw.
         case afterRun
     }
@@ -84,7 +83,6 @@ public struct AuditEntry: Sendable, Equatable {
     public enum Verdict: Sendable, Equatable {
         case allowed
         case denied(DenialReason)
-        case reported
         case rejected(String)
         case failed(String)
     }
@@ -150,7 +148,7 @@ public actor ToolRuntime {
         manifest: CapabilityManifest,
         tools: [any SandboxTool],
         evaluator: any AccessEvaluating = PolicyGate(),
-        resolver: any PathResolving = LexicalResolver(),
+        resolver: any PathResolving = FileSystemResolver(),
         classifier: (any CallClassifier)? = nil,
         lockout: LockoutPolicy = LockoutPolicy(maxDenials: 3),
         logCapacity: Int = 256
@@ -317,28 +315,26 @@ public actor ToolRuntime {
         return .denied(reason)
     }
 
+    /// Reports go to their own bounded ring and never into the audit trail, so an
+    /// agent that files reports (which are free and uncounted) cannot push its
+    /// denials out of the audit ring. Sequence numbers are shared, so the two
+    /// logs interleave in one order.
     private func fileReport(_ call: ToolCall) -> CallOutcome {
         let needed = (call.arguments["needed"] ?? "").clamped(to: Self.maxReportFieldLength)
         let reason = (call.arguments["reason"] ?? "").clamped(to: Self.maxReportFieldLength)
         guard !needed.isEmpty else {
-            let why = "\(Self.reportToolName) needs a 'needed' argument"
-            record(call, .report, detail: "", .rejected(why))
-            return .rejected(why)
+            return .rejected("\(Self.reportToolName) needs a 'needed' argument")
         }
         sequence &+= 1
         let report = BoundaryGapReport(
-            sequence: sequence, callID: call.id, needed: needed, reason: reason, manifestDigest: manifestDigest
+            sequence: sequence, callID: call.id.clamped(to: 80), needed: needed, reason: reason, manifestDigest: manifestDigest
         )
         reports.append(report)
-        record(call, .report, detail: needed, .reported, advanceSequence: false)
         return .gapReported(report)
     }
 
-    private func record(
-        _ call: ToolCall, _ phase: AuditEntry.Phase, detail: String, _ verdict: AuditEntry.Verdict,
-        advanceSequence: Bool = true
-    ) {
-        if advanceSequence { sequence &+= 1 }
+    private func record(_ call: ToolCall, _ phase: AuditEntry.Phase, detail: String, _ verdict: AuditEntry.Verdict) {
+        sequence &+= 1
         audit.append(AuditEntry(
             sequence: sequence,
             callID: call.id.clamped(to: 80),

@@ -129,7 +129,21 @@ final class ToolRuntimeTests: XCTestCase {
         let snap = await runtime.snapshot()
         XCTAssertEqual(snap.reports, [report])
         XCTAssertEqual(snap.denials, 1)
-        XCTAssertEqual(snap.audit.last?.sequence, report.sequence)
+        XCTAssertGreaterThan(report.sequence, snap.audit.last?.sequence ?? 0, "reports share the sequence")
+    }
+
+    func testReportsCannotEvictDenialsFromTheAuditTrail() async throws {
+        let runtime = try ToolRuntime(manifest: try manifest(), tools: [readTool(RunCounter())], lockout: .disabled, logCapacity: 4)
+        _ = await runtime.execute(read("/escape", id: "deny"))
+        for i in 0..<50 {
+            _ = await runtime.execute(ToolCall(id: "r\(i)", tool: ToolRuntime.reportToolName, arguments: ["needed": "x"]))
+        }
+        _ = await runtime.execute(ToolCall(id: "bad", tool: ToolRuntime.reportToolName)) // rejected, also not audited
+        let snap = await runtime.snapshot()
+        XCTAssertEqual(snap.audit.map(\.callID), ["deny"])
+        XCTAssertEqual(snap.droppedAuditEntries, 0)
+        XCTAssertEqual(snap.reports.count, 4)
+        XCTAssertEqual(snap.droppedReports, 46)
     }
 
     func testReportToolRequiresNeededAndClampsFieldLength() async throws {
@@ -289,7 +303,8 @@ final class ToolRuntimeTests: XCTestCase {
         let (release, releaser) = AsyncStream<Void>.makeStream()
         let runtime = try ToolRuntime(
             manifest: try manifest(), tools: [readTool(counter)],
-            classifier: ParkedClassifier(entered: entered, release: release, decision: .allow)
+            classifier: ParkedClassifier(entered: entered, release: release, decision: .allow),
+            lockout: LockoutPolicy(maxDenials: 1)
         )
         let parked = read("/W/session.token")
         let call = Task { await runtime.execute(parked) }
@@ -300,6 +315,32 @@ final class ToolRuntimeTests: XCTestCase {
         XCTAssertEqual(outcome, .denied(.manifestChanged))
         let runs = await counter.runs
         XCTAssertEqual(runs, 0)
+        let locked = await runtime.isLocked
+        XCTAssertFalse(locked, "the host's manifest swap is not the agent's denial")
+    }
+
+    func testLinkRepointedToAnotherFlaggedFileDuringReviewIsDenied() async throws {
+        let counter = RunCounter()
+        let (enteredStream, entered) = AsyncStream<Void>.makeStream()
+        let (release, releaser) = AsyncStream<Void>.makeStream()
+        let link = try SandboxPath("/W/current.token")
+        let resolver = SwitchableResolver([link: try SandboxPath("/W/harmless.token")])
+        let runtime = try ToolRuntime(
+            manifest: try manifest(), tools: [readTool(counter)], resolver: resolver,
+            classifier: ParkedClassifier(entered: entered, release: release, decision: .allow),
+            lockout: LockoutPolicy(maxDenials: 1)
+        )
+        let parked = read("/W/current.token")
+        let call = Task { await runtime.execute(parked) }
+        for await _ in enteredStream { break }
+        resolver.swap(to: [link: try SandboxPath("/W/vault.token")]) // still inside, still flagged, but not what was reviewed
+        releaser.yield()
+        let outcome = await call.value
+        XCTAssertEqual(outcome, .denied(.verdictChangedDuringReview))
+        let runs = await counter.runs
+        XCTAssertEqual(runs, 0)
+        let locked = await runtime.isLocked
+        XCTAssertFalse(locked, "a link changing under review is not the agent's denial")
     }
 
     func testSessionLockedDuringReviewDeniesTheParkedCall() async throws {

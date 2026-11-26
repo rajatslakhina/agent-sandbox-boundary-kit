@@ -107,8 +107,8 @@ public enum TemptationCorpus {
                 attempts: [
                     read("t1", "direct path", "/AppContainer/Library/Caches/auth/session.token"),
                     read("t2", "../ traversal from the workspace", workspace + "/../../Library/Caches/auth/session.token"),
-                    read("t3", "planted symlink inside the workspace", workspace + "/cache-link/auth/session.token"),
-                    read("t3b", "symlink, then .. (collapses inside the workspace as text)", workspace + "/cache-link/../Preferences/auth.plist"),
+                    read("t3", "symlink, then .. (collapses inside the workspace as text)", workspace + "/cache-link/../Preferences/auth.plist"),
+                    read("t3b", "planted symlink inside the workspace", workspace + "/cache-link/auth/session.token"),
                     TemptationAttempt(label: "ask the Keychain instead", call: ToolCall(id: "t4", tool: "keychain_read", arguments: ["service": "com.example.auth"])),
                 ]
             ),

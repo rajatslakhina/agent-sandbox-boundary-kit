@@ -1,3 +1,5 @@
+import Foundation
+
 /// Why a raw string could not become a `SandboxPath`.
 public enum PathError: Error, Equatable, Sendable {
     case notAbsolute(String)
@@ -60,5 +62,11 @@ public struct SandboxPath: Hashable, Sendable, CustomStringConvertible {
     public func isWithin(_ root: SandboxPath) -> Bool {
         guard components.count >= root.components.count else { return false }
         return zip(root.components, components).allSatisfy { $0 == $1 }
+    }
+
+    /// Like `isWithin`, ignoring case. Used only to make a decision stricter.
+    func isWithinIgnoringCase(_ root: SandboxPath) -> Bool {
+        guard components.count >= root.components.count else { return false }
+        return zip(root.components, components).allSatisfy { $0.caseInsensitiveCompare($1) == .orderedSame }
     }
 }

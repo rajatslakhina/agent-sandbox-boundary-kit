@@ -57,10 +57,10 @@ public struct PolicyGate: AccessEvaluating {
         }
         // The deepest grant that contains a path decides its mode, so a read-only
         // folder nested inside a read-write one stays read-only.
-        guard let lexicalGrant = Self.decidingGrant(for: lexical, among: manifest.fileGrants.map { ($0, $0.root) }) else {
+        guard let lexicalMode = Self.decidingMode(for: lexical, among: manifest.fileGrants.map { ($0, $0.root) }) else {
             return .deny(.outsideFileGrants(lexical.string))
         }
-        if access == .write, lexicalGrant.mode != .readWrite {
+        if access == .write, lexicalMode != .readWrite {
             return .deny(.writeNotGranted(lexical.string))
         }
 
@@ -73,8 +73,8 @@ public struct PolicyGate: AccessEvaluating {
         let physicalRoots = manifest.fileGrants.compactMap { grant in
             (try? resolver.resolve(grant.root)).map { (grant, $0) }
         }
-        guard let physicalGrant = Self.decidingGrant(for: physical, among: physicalRoots),
-              access == .read || physicalGrant.mode == .readWrite
+        guard let physicalMode = Self.decidingMode(for: physical, among: physicalRoots),
+              access == .read || physicalMode == .readWrite
         else {
             return .deny(.symlinkEscape(lexical: lexical.string, resolved: physical.string))
         }
@@ -85,26 +85,43 @@ public struct PolicyGate: AccessEvaluating {
             }
         }
         guard flagged.isEmpty else {
-            return .needsReview("\(access.rawValue) of \(lexical.string.clamped(to: 200)) matches review suffix \(flagged.sorted().joined(separator: ", "))")
+            // The resolved path is part of the reason, so the post-review re-check
+            // notices a link repointed to a different file while the call was parked.
+            let target = physical == lexical ? "" : " (resolves to \(physical.string.clamped(to: 200)))"
+            return .needsReview("\(access.rawValue) of \(lexical.string.clamped(to: 200))\(target) matches review suffix \(flagged.sorted().joined(separator: ", "))")
         }
         return .allow
     }
 
-    /// The grant whose root is the longest prefix of `path`. On a tie (the same root
-    /// listed twice with different modes) the more restrictive mode wins.
-    static func decidingGrant(for path: SandboxPath, among grants: [(FileGrant, SandboxPath)]) -> FileGrant? {
-        var best: (grant: FileGrant, depth: Int)?
+    /// The mode of the grant whose root is the longest prefix of `path`, or `nil`
+    /// when no grant contains it. On a tie (the same root listed twice with
+    /// different modes) the more restrictive mode wins.
+    ///
+    /// Containment is exact (case-sensitive), so a case variant never makes a path
+    /// "inside" on a case-sensitive volume. But on a case-insensitive volume
+    /// (default macOS APFS, and so the iOS Simulator) `/W/reference` IS
+    /// `/W/Reference`; so a read-only grant at least as deep that matches ignoring
+    /// case also forces read-only. That rule can only narrow (fail closed).
+    static func decidingMode(for path: SandboxPath, among grants: [(FileGrant, SandboxPath)]) -> FileGrant.Mode? {
+        var best: (mode: FileGrant.Mode, depth: Int)?
         for (grant, root) in grants where path.isWithin(root) {
             let depth = root.components.count
             if let current = best {
                 if depth > current.depth || (depth == current.depth && grant.mode == .readOnly) {
-                    best = (grant, depth)
+                    best = (grant.mode, depth)
                 }
             } else {
-                best = (grant, depth)
+                best = (grant.mode, depth)
             }
         }
-        return best?.grant
+        guard let decided = best else { return nil }
+        if decided.mode == .readWrite {
+            let caseVariantReadOnly = grants.contains { grant, root in
+                grant.mode == .readOnly && root.components.count >= decided.depth && path.isWithinIgnoringCase(root)
+            }
+            if caseVariantReadOnly { return .readOnly }
+        }
+        return decided.mode
     }
 
     private func evaluateNetwork(_ raw: String, _ manifest: CapabilityManifest) -> RuleOutcome {

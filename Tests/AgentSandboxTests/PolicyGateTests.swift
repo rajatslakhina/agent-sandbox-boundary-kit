@@ -60,10 +60,12 @@ final class NetworkRuleTests: XCTestCase {
     }
 
     func testRejectsMalformedAndNonASCIIHosts() throws {
+        // URLComponents parses "not a url" as a relative reference with no scheme.
         XCTAssertEqual(try verdict("not a url"), .deny(.schemeNotAllowed("")))
-        if case .deny = try verdict("https://аpi.example.com/") {} else { XCTFail("Cyrillic look-alike host must be denied") }
-        if case .deny = try verdict("https://api%2Eexample.com/") {} else { XCTFail("percent-encoded host must be denied") }
-        if case .deny = try verdict("https:///nohost") {} else { XCTFail("missing host must be denied") }
+        // URLComponents percent-encodes a non-ASCII host; the host syntax check refuses `%`.
+        XCTAssertEqual(try verdict("https://аpi.example.com/"), .deny(.malformedURL("https://аpi.example.com/")))
+        XCTAssertEqual(try verdict("https://api%2Eexample.com/"), .deny(.malformedURL("https://api%2Eexample.com/")))
+        XCTAssertEqual(try verdict("https:///nohost"), .deny(.malformedURL("https:///nohost")))
     }
 
     func testRuleConstructionValidates() {
@@ -152,6 +154,18 @@ final class FileRuleTests: XCTestCase {
         // The same root listed twice with different modes: the restrictive one wins.
         let dup = CapabilityManifest(fileGrants: [try FileGrant("/D", .readWrite), try FileGrant("/D", .readOnly)])
         XCTAssertEqual(gate.evaluate(.file(path: "/D/x", access: .write), under: dup, resolver: LexicalResolver()), .deny(.writeNotGranted("/D/x")))
+    }
+
+    func testCaseVariantOfANestedReadOnlyGrantIsStillReadOnly() throws {
+        // On a case-insensitive volume /W/reference IS /W/Reference.
+        let m = CapabilityManifest(fileGrants: [try FileGrant("/W", .readWrite), try FileGrant("/W/Reference", .readOnly)])
+        XCTAssertEqual(gate.evaluate(.file(path: "/W/reference/style.md", access: .write), under: m, resolver: LexicalResolver()),
+                       .deny(.writeNotGranted("/W/reference/style.md")))
+        XCTAssertEqual(gate.evaluate(.file(path: "/W/reference/style.md", access: .read), under: m, resolver: LexicalResolver()), .allow)
+        // A case variant never makes a path "inside": on a case-sensitive volume it is another directory.
+        let only = CapabilityManifest(fileGrants: [try FileGrant("/Docs/Reference", .readOnly)])
+        XCTAssertEqual(gate.evaluate(.file(path: "/Docs/reference/x.md", access: .read), under: only, resolver: LexicalResolver()),
+                       .deny(.outsideFileGrants("/Docs/reference/x.md")))
     }
 
     func testGrantRootThatIsItselfALinkIsJudgedByItsPhysicalLocation() throws {

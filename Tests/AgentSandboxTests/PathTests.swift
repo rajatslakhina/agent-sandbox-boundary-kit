@@ -80,8 +80,8 @@ final class ResolverTests: XCTestCase {
             XCTAssertFalse(resolved.isWithin(physicalWorkspace), "\(name) -> \(resolved)")
         }
         // A relative link whose target walks `..` through ANOTHER link: the kernel
-        // applies that `..` after following `s`, so `a` lands beside the outside
-        // directory, not inside the workspace. Text-collapsing `s/../x` would say
+        // applies that `..` after following `s`, so `a` lands inside the outside
+        // directory (next to `deep`), not inside the workspace. Text-collapsing `s/../x` would say
         // `Workspace/x` and wave it through.
         let deep = outside.appendingPathComponent("deep")
         try fm.createDirectory(at: deep, withIntermediateDirectories: true)
